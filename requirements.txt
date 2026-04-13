@@ -1,0 +1,12 @@
+pyTelegramBotAPI
+python-dotenv
+google-generativeai
+openai
+flask
+requests
+ddgs
+pypdf
+python-docx
+openpyxl
+phpserialize
+xlrd
