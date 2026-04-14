@@ -16,10 +16,12 @@
 - **Обычные фото:** Обрабатываются молниеносной **Llama 4 Scout (17B/Groq)** для мгновенного описания.
 - **Рукописный текст и сложный OCR:** Включается **Gemma 4 31B (OpenRouter Paid)** — признанный эксперт в распознавании почерка и сложных структур.
 
-### 🎨 Генерация изображений через Pollinations.ai
-Интеграция с мощным API **Pollinations.ai** позволяет создавать профессиональные арты прямо в чате:
-- Используются современные модели (например, **Flux**, **Zimage**).
-- Прямая генерация по текстовому описанию.
+### 🎨 Искусство и Генерация (AI Multimedia)
+Интеграция с несколькими движками позволяет боту выбирать лучший вариант для создания артов:
+*   **Pollinations.ai:** Быстрая генерация моделей Flux и Zimage.
+*   **Pixazo AI (Gateway):** Профессиональный шлюз для модели **Flux-1-schnell**, обеспечивающий высокую детализацию и стабильность.
+*   **Together AI:** Резервный канал для тяжелых моделей генерации.
+*   Автоматическое улучшение промптов перед отправкой нейросети.
 
 ### 🧠 Контекстная память и Поиск
 - **Memory System:** Бот помнит контекст диалога и детали из загруженных ранее изображений.
@@ -35,8 +37,9 @@
 - **Providers:**
   - **Groq:** Llama 4 Scout (Основная логика)
   - **OpenRouter:** Gemma 4 31B (OCR Эксперт)
-  - **Pollinations.ai:** Генерация изображений
-  - **Serper:** Реал-тайм поиск
+  - **Image Gen (Fast):** Pollinations.ai (Платформа для открытой и быстрой генерации изображений)
+  - **Image Gen (Pro):** Pixazo AI (Высококачественный Flux-1-schnell через Unified Gateway)
+  - **Real-time Web:** Serper (JSON-API для Google Search)
 
 ---
 
@@ -56,8 +59,9 @@
    TELEGRAM_BOT_TOKEN=your_token
    GROQ_API_KEY=your_key
    OPENROUTER_API_KEY=your_key
-   SERPER_API_KEY=your_key
-   POLLINATIONS_API_KEY=your_key
+   SERPER_API_KEY=xxx...
+   POLLINATIONS_API_KEY=sk_xxx...
+   PIXAZO_API_KEY=xxx...
    ```
 
 ---
