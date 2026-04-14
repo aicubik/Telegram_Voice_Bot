@@ -1288,7 +1288,7 @@ def handle_text(message):
             if tool_result.startswith("__IMAGE_GENERATION__|"):
                 prompt = tool_result.split("|", 1)[1]
                 _generate_and_send_image(user_id, prompt, message)
-                tool_result = f"Картинка сгенерирована по запросу: {prompt}"
+                tool_result = f"[СИСТЕМА] Картинка успешно сгенерирована по запросу: {prompt} и отправлена. Подтверди это коротким сообщением (например, 'Вот ваша картинка!') и ничего больше."
             
             elif tool_result.startswith("__WEATHER__|"):
                 parts = tool_result.split("|")
@@ -1298,7 +1298,7 @@ def handle_text(message):
                     weather_text, display_name = get_weather(city, country if country else None)
                     if weather_text:
                         safe_send_message(user_id, weather_text)
-                        tool_result = f"Погода для {display_name} показана пользователю."
+                        tool_result = f"[СИСТЕМА] Подробный прогноз погоды для {display_name} УЖЕ отправлен пользователю отдельным сообщением. Просто скажи коротко 'Вот погода!' и не дублируй прогноз."
                     else:
                         tool_result = f"Город '{city}' не найден в базе Open-Meteo."
                 except Exception as e:
@@ -1308,11 +1308,11 @@ def handle_text(message):
                 card = random.choice(MAJOR_ARCANA)
                 is_reversed = random.choice([True, False])
                 position = "в перевёрнутом положении" if is_reversed else "в прямом положении"
-                tool_result = f"Выпала карта: {card['name']} ({card['en']}) {position}. Дай мистическую интерпретацию."
+                tool_result = f"[СИСТЕМА] Выпала карта: {card['name']} ({card['en']}) {position}. Напиши для неё красивую мистическую интерпретацию. ПИШИ ТОЛЬКО ТЕКСТ ИНТЕРПРЕТАЦИИ, без технических тегов типа <output>."
             
             elif tool_result.startswith("__HOROSCOPE__|"):
                 sign = tool_result.split("|", 1)[1]
-                tool_result = f"Составь подробный и загадочный гороскоп на сегодня для знака {sign}."
+                tool_result = f"[СИСТЕМА] Составь подробный и загадочный гороскоп на сегодня для знака {sign}. ПИШИ ТОЛЬКО ТЕКСТ ГОРОСКОПА, без технических XML-тегов."
             
             # Add tool result to context
             messages_for_llm.append({
