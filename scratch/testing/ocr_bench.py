@@ -23,7 +23,7 @@ def test_model(model_id):
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "HTTP-Referer": "https://github.com/aicubik/Telegram_Voice_Bot",
         "X-Title": "OCR Benchmark Bot",
-        "Content-Type": "json"
+        "Content-Type": "application/json"
     }
     
     payload = {

@@ -230,6 +230,7 @@ def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma
     messages = [
         {
             "role": "user",
+            "content": [
                 {"type": "text", "text": f"Ты — самый точный в мире эксперт по распознаванию рукописного текста (OCR). Пожалуйста, максимально точно перепиши текст с изображения, сохраняя структуру. Используй русский язык. ОЧЕНЬ ВАЖНО: не фантазируй, пиши только то, что видишь. {user_question}"},
                 {
                     "type": "image_url",
@@ -896,6 +897,7 @@ def handle_photo(message):
 def handle_voice(message):
     user_id = message.chat.id
     bot.send_chat_action(user_id, 'record_audio')
+    temp_path = None
     try:
         file_info = bot.get_file(message.voice.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
@@ -905,22 +907,27 @@ def handle_voice(message):
         with open(temp_path, "rb") as audio_file:
             transcription = groq_client.audio.transcriptions.create(file=(temp_path, audio_file.read()), model="whisper-large-v3-turbo")
         query = transcription.text
-        os.remove(temp_path)
         safe_send_message(user_id, f"🎤 *Распознано:* _{query}_", reply_to_message_id=message.message_id)
         message.text = query
         handle_text(message)
     except Exception as e:
         bot.reply_to(message, f"⚠️ Ошибка голоса: {e}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def safe_send_message(chat_id, text, **kwargs):
     """Безопасная отправка: сначала Markdown, при ошибке — plain text, при длинном — частями."""
     if len(text) > 4096:
-        # Длинный текст — разбиваем на части, отправляем без Markdown
+        # Длинный текст — разбиваем на части, отправляем plain text (Markdown может сломаться на разрезе)
         for i in range(0, len(text), 4096):
             try:
-                bot.send_message(chat_id, text[i:i+4096], **(kwargs if i == 0 else {}))
-            except Exception:
-                pass
+                chunk_kwargs = {k: v for k, v in kwargs.items() if k != 'parse_mode'}
+                if i > 0:
+                    chunk_kwargs.pop('reply_to_message_id', None)
+                bot.send_message(chat_id, text[i:i+4096], **chunk_kwargs)
+            except Exception as e:
+                print(f"⚠️ Failed to send chunk {i}: {e}")
         return
     try:
         bot.send_message(chat_id, text, parse_mode="Markdown", **kwargs)
@@ -1090,8 +1097,6 @@ def handle_document(message):
             
         # Добавляем в контекст
         doc_info = f"[ДОКУМЕНТ: {message.document.file_name}]\n{text}"
-        
-        memory = get_memory(user_id)
         add_message_to_memory(user_id, "user", doc_info)
             
         if message.caption:
@@ -1116,7 +1121,9 @@ def handle_text(message):
     query = message.text
     query_lower = query.lower()
     
-    draw_triggers = ["нарисуй", "изобрази", "картинка", "сгенерируй", "фото", "создай"]
+    # Фразовые триггеры для рисования (избегаем ложных срабатываний на "фото" и "создай")
+    draw_triggers = ["нарисуй", "изобрази", "сгенерируй картинк", "сгенерируй изображен",
+                     "создай картинк", "создай изображен", "нарисуй картинк"]
     if any(trigger in query_lower for trigger in draw_triggers):
         _generate_and_send_image(user_id, query, message)
         return

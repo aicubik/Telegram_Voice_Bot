@@ -1,6 +1,5 @@
 pyTelegramBotAPI
 python-dotenv
-google-generativeai
 openai
 flask
 requests
@@ -10,5 +9,3 @@ python-docx
 openpyxl
 phpserialize
 xlrd
-Pillow
-gTTS
