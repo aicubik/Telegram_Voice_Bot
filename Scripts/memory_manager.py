@@ -60,6 +60,23 @@ def init_db():
         ON long_term_memory(user_id)
     """)
     
+    # Reminders table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            reminder_text TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            remind_at REAL NOT NULL,
+            status TEXT DEFAULT 'pending',
+            sent_at REAL
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_reminders_pending 
+        ON reminders(status, remind_at)
+    """)
+    
     conn.commit()
     conn.close()
     print("✅ Memory DB initialized.")
@@ -309,3 +326,99 @@ def jina_read_url(url: str) -> str:
     except Exception as e:
         print(f"⚠️ Jina Reader exception: {e}")
         return ""
+
+
+# --- Reminders CRUD ---
+
+def create_reminder(user_id: int, text: str, remind_at: float) -> int | None:
+    """
+    Create a new reminder. Returns the reminder ID on success, None on failure.
+    remind_at is a Unix timestamp (seconds since epoch).
+    """
+    try:
+        conn = _get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO reminders (user_id, reminder_text, created_at, remind_at, status) VALUES (?, ?, ?, ?, 'pending')",
+            (user_id, text, time.time(), remind_at)
+        )
+        reminder_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        print(f"⏰ Reminder #{reminder_id} created for user {user_id}: '{text[:40]}...' at {remind_at}")
+        return reminder_id
+    except Exception as e:
+        print(f"⚠️ Create reminder error: {e}")
+        return None
+
+
+def get_due_reminders() -> list[dict]:
+    """
+    Get all pending reminders whose remind_at time has passed.
+    Returns list of {id, user_id, reminder_text, remind_at}.
+    """
+    try:
+        conn = _get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, user_id, reminder_text, remind_at FROM reminders WHERE status = 'pending' AND remind_at <= ?",
+            (time.time(),)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"id": r[0], "user_id": r[1], "reminder_text": r[2], "remind_at": r[3]} for r in rows]
+    except Exception as e:
+        print(f"⚠️ Get due reminders error: {e}")
+        return []
+
+
+def mark_reminder_sent(reminder_id: int) -> bool:
+    """Mark a reminder as sent."""
+    try:
+        conn = _get_db()
+        conn.execute(
+            "UPDATE reminders SET status = 'sent', sent_at = ? WHERE id = ?",
+            (time.time(), reminder_id)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"⚠️ Mark reminder sent error: {e}")
+        return False
+
+
+def get_user_reminders(user_id: int, status: str = "pending") -> list[dict]:
+    """Get all reminders for a user with given status."""
+    try:
+        conn = _get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, reminder_text, remind_at, status FROM reminders WHERE user_id = ? AND status = ? ORDER BY remind_at ASC",
+            (user_id, status)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"id": r[0], "reminder_text": r[1], "remind_at": r[2], "status": r[3]} for r in rows]
+    except Exception as e:
+        print(f"⚠️ Get user reminders error: {e}")
+        return []
+
+
+def cancel_reminder(reminder_id: int, user_id: int) -> bool:
+    """Cancel a pending reminder. Returns True if found and cancelled."""
+    try:
+        conn = _get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE reminders SET status = 'cancelled' WHERE id = ? AND user_id = ? AND status = 'pending'",
+            (reminder_id, user_id)
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return affected > 0
+    except Exception as e:
+        print(f"⚠️ Cancel reminder error: {e}")
+        return False
+

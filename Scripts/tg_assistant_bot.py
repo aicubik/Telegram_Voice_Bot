@@ -4,6 +4,8 @@ import base64
 import random
 import tempfile
 import json
+import threading
+import datetime
 import telebot
 from telebot import types
 import requests as http_requests
@@ -23,6 +25,7 @@ import xlrd
 
 # Agent modules
 from memory_manager import save_memory, search_memories, clear_user_memories
+from memory_manager import get_due_reminders, mark_reminder_sent
 from agent_tools import TOOLS, execute_tool
 
 try:
@@ -67,7 +70,7 @@ SYSTEM_PROMPT = (
     "Ты — умный персональный ассистент с доступом к инструментам. "
     "ВСЕГДА отвечай на русском языке, если пользователь не попросит иначе. "
     "Будь кратким, конкретным и дружелюбным. Избегай повторов и воды. "
-    "Твой пользователь находится в Беларуси — учитывай это при ответах "
+    "Твой пользователь находится в Беларуси (UTC+3) — учитывай это при ответах "
     "о ценах, валютах, новостях и законах, если не указано иное. "
     "\n\nУ тебя есть инструменты (tools). ИСПОЛЬЗУЙ ИХ АКТИВНО:\n"
     "- search_web: Ищи в интернете, если вопрос про актуальные события, цены, новости, факты. НЕ УГАДЫВАЙ — ищи!\n"
@@ -78,6 +81,9 @@ SYSTEM_PROMPT = (
     "- recall_memories: Вспоминай ранее сохранённые факты.\n"
     "- draw_tarot_card: Вытяни карту Таро для гадания.\n"
     "- get_horoscope: Составь гороскоп для знака зодиака.\n"
+    "- set_reminder: Создай напоминание. Вычисли Unix timestamp на основе текущего времени.\n"
+    "- list_reminders: Покажи активные напоминания пользователя.\n"
+    "- cancel_reminder: Отмени напоминание по ID.\n"
     "\nКРИТИЧЕСКИ ВАЖНО:\n"
     "1. ВСЕГДА вызывай draw_tarot_card когда пользователь просит погадать, вытянуть карту, сделать расклад. "
     "НИКОГДА не пиши текст про Таро без вызова инструмента!\n"
@@ -85,6 +91,8 @@ SYSTEM_PROMPT = (
     "НИКОГДА не отвечай про погоду без вызова инструмента!\n"
     "3. ВСЕГДА вызывай generate_image когда просят нарисовать. "
     "НИКОГДА не описывай картинку текстом!\n"
+    "4. ВСЕГДА вызывай set_reminder когда просят напомнить, поставить напоминание, будильник. "
+    "Рассчитай remind_at = текущий Unix timestamp + задержка в секундах.\n"
     "\nКогда пользователь делится личной информацией (имя, предпочтения, аллергии, "
     "день рождения), ОБЯЗАТЕЛЬНО вызови remember_fact.\n"
     "Если пользователь задаёт вопрос, на который ты не уверен в ответе, вызови search_web.\n"
@@ -980,6 +988,133 @@ def handle_horoscope_callback(call):
     except Exception as e:
         bot.send_message(user_id, f"⚠️ Ошибка гороскопа: {e}")
 
+# --- Reminder Commands ---
+
+def _parse_remind_duration(text: str) -> int | None:
+    """Parse duration like '30m', '2h', '1d', '15s' into seconds. Returns None if invalid."""
+    text = text.strip().lower()
+    multipliers = {'s': 1, 'с': 1, 'm': 60, 'м': 60, 'min': 60, 'мин': 60, 
+                   'h': 3600, 'ч': 3600, 'd': 86400, 'д': 86400}
+    
+    for suffix, mult in sorted(multipliers.items(), key=lambda x: -len(x[0])):
+        if text.endswith(suffix):
+            num_str = text[:-len(suffix)].strip()
+            try:
+                return int(float(num_str) * mult)
+            except ValueError:
+                return None
+    # Try pure number (assume minutes)
+    try:
+        return int(float(text) * 60)
+    except ValueError:
+        return None
+
+@bot.message_handler(commands=['remind'])
+def handle_remind_command(message):
+    """Handle /remind 30m купить молоко"""
+    user_id = message.chat.id
+    raw_text = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else ""
+    if not raw_text:
+        bot.reply_to(message, 
+            "⏰ *Формат:* `/remind <время> <текст>`\n\n"
+            "📝 *Примеры:*\n"
+            "• `/remind 30m купить молоко`\n"
+            "• `/remind 2h позвонить маме`\n"
+            "• `/remind 1d проверить почту`\n\n"
+            "⏱ *Суффиксы:* `m`=минуты, `h`=часы, `d`=дни\n\n"
+            "💡 Или просто напиши в чат:\n"
+            "_«напомни через 2 часа позвонить маме»_",
+            parse_mode="Markdown")
+        return
+    
+    # Split into duration and text
+    parts = raw_text.split(maxsplit=1)
+    duration_str = parts[0]
+    reminder_text = parts[1] if len(parts) > 1 else "Напоминание"
+    
+    seconds = _parse_remind_duration(duration_str)
+    if not seconds:
+        bot.reply_to(message, f"⚠️ Не могу распознать время `{duration_str}`. Используй формат: `30m`, `2h`, `1d`", parse_mode="Markdown")
+        return
+    
+    if seconds < 30:
+        bot.reply_to(message, "⚠️ Минимальное время — 30 секунд.")
+        return
+    
+    if seconds > 30 * 86400:
+        bot.reply_to(message, "⚠️ Максимальное время — 30 дней.")
+        return
+    
+    from memory_manager import create_reminder
+    remind_at = time.time() + seconds
+    reminder_id = create_reminder(user_id, reminder_text, remind_at)
+    
+    if reminder_id:
+        # Human-readable time
+        if seconds < 3600:
+            human_time = f"через {seconds // 60} мин."
+        elif seconds < 86400:
+            h = seconds // 3600
+            m = (seconds % 3600) // 60
+            human_time = f"через {h}ч" + (f" {m}мин" if m else "")
+        else:
+            d = seconds // 86400
+            human_time = f"через {d} дн."
+        
+        tz_minsk = datetime.timezone(datetime.timedelta(hours=3))
+        fire_time = datetime.datetime.fromtimestamp(remind_at, tz=tz_minsk).strftime('%H:%M %d.%m')
+        
+        bot.reply_to(message, f"✅ Напоминание #{reminder_id} установлено!\n\n📝 {reminder_text}\n⏰ {human_time} ({fire_time})")
+    else:
+        bot.reply_to(message, "⚠️ Не удалось создать напоминание.")
+
+@bot.message_handler(commands=['reminders'])
+def handle_reminders_command(message):
+    """Show all active reminders"""
+    user_id = message.chat.id
+    from memory_manager import get_user_reminders
+    reminders = get_user_reminders(user_id, status="pending")
+    
+    if not reminders:
+        bot.reply_to(message, "📋 У тебя нет активных напоминаний.")
+        return
+    
+    tz_minsk = datetime.timezone(datetime.timedelta(hours=3))
+    text = f"📋 *Активные напоминания ({len(reminders)}):*\n\n"
+    for r in reminders:
+        dt = datetime.datetime.fromtimestamp(r['remind_at'], tz=tz_minsk)
+        time_str = dt.strftime('%H:%M %d.%m.%Y')
+        # Time remaining
+        remaining = r['remind_at'] - time.time()
+        if remaining < 3600:
+            remaining_str = f"{int(remaining // 60)} мин."
+        elif remaining < 86400:
+            remaining_str = f"{int(remaining // 3600)}ч {int((remaining % 3600) // 60)}мин"
+        else:
+            remaining_str = f"{int(remaining // 86400)} дн."
+        
+        text += f"#{r['id']} — {r['reminder_text']}\n   ⏰ {time_str} (через {remaining_str})\n   ❌ Отмена: `/cancel {r['id']}`\n\n"
+    
+    bot.reply_to(message, text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['cancel'])
+def handle_cancel_reminder_command(message):
+    """Cancel a reminder by ID"""
+    user_id = message.chat.id
+    raw_text = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else ""
+    
+    if not raw_text or not raw_text.strip().isdigit():
+        bot.reply_to(message, "⚠️ Укажи ID напоминания: `/cancel 3`", parse_mode="Markdown")
+        return
+    
+    reminder_id = int(raw_text.strip())
+    from memory_manager import cancel_reminder as db_cancel
+    
+    if db_cancel(reminder_id, user_id):
+        bot.reply_to(message, f"✅ Напоминание #{reminder_id} отменено.")
+    else:
+        bot.reply_to(message, f"⚠️ Напоминание #{reminder_id} не найдено или уже выполнено.")
+
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     user_id = message.chat.id
@@ -1279,6 +1414,18 @@ def handle_text(message):
     
     # 3. Agent Loop: до 3 итераций tool_calls
     messages_for_llm = get_memory(user_id).copy()
+    
+    # Inject current time into system prompt so LLM can compute remind_at timestamps
+    tz_minsk = datetime.timezone(datetime.timedelta(hours=3))
+    now = datetime.datetime.now(tz=tz_minsk)
+    unix_now = int(time.time())
+    time_injection = f"\n\nТекущее время: {now.strftime('%Y-%m-%d %H:%M')} (Минск, UTC+3). Unix timestamp: {unix_now}."
+    if messages_for_llm and messages_for_llm[0].get("role") == "system":
+        messages_for_llm[0] = {
+            "role": "system",
+            "content": messages_for_llm[0]["content"] + time_injection
+        }
+    
     max_iterations = 3
     
     for iteration in range(max_iterations):
@@ -1388,8 +1535,40 @@ def handle_text(message):
         safe_send_message(user_id, final_text)
         add_message_to_memory(user_id, "assistant", final_text)
 
+# ============================================================
+# REMINDER WATCHDOG — Background thread that fires due reminders
+# ============================================================
+
+def _reminder_watchdog():
+    """Background thread: check for due reminders every 30 seconds and send them."""
+    print("⏰ Reminder watchdog started.")
+    while True:
+        try:
+            due = get_due_reminders()
+            for r in due:
+                try:
+                    tz_minsk = datetime.timezone(datetime.timedelta(hours=3))
+                    set_time = datetime.datetime.fromtimestamp(r['remind_at'], tz=tz_minsk).strftime('%H:%M')
+                    msg = f"⏰ *Напоминание!*\n\n📝 {r['reminder_text']}\n🕐 Установлено на {set_time}"
+                    safe_send_message(r['user_id'], msg)
+                    mark_reminder_sent(r['id'])
+                    print(f"  ✅ Reminder #{r['id']} sent to user {r['user_id']}")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to send reminder #{r['id']}: {e}")
+                    # Don't mark as sent — will retry next cycle
+        except Exception as e:
+            print(f"⚠️ Reminder watchdog error: {e}")
+        
+        time.sleep(30)  # Check every 30 seconds
+
+
 if __name__ == "__main__":
     print("Бот запускается...")
     keep_alive()  # Открываем порт для Render health check
+    
+    # Start reminder watchdog as daemon thread
+    reminder_thread = threading.Thread(target=_reminder_watchdog, daemon=True)
+    reminder_thread.start()
+    
     bot.remove_webhook()
     bot.polling(none_stop=True)

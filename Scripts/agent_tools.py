@@ -15,7 +15,8 @@ import random
 import time
 from memory_manager import (
     save_memory, search_memories, jina_search, jina_read_url,
-    get_all_memories, clear_user_memories
+    get_all_memories, clear_user_memories,
+    create_reminder, get_user_reminders, cancel_reminder as db_cancel_reminder
 )
 
 # ============================================================
@@ -201,6 +202,72 @@ TOOLS = [
                 "required": ["sign"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": (
+                "Set a personal reminder for the user. The reminder will be sent as a Telegram message at the specified time. "
+                "Use when the user says things like 'напомни', 'remind me', 'через 30 минут', 'завтра в 9'. "
+                "You MUST calculate the exact Unix timestamp for remind_at based on the user's request and the current time. "
+                "Current timezone: Europe/Minsk (UTC+3)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "What to remind the user about (in Russian)."
+                    },
+                    "remind_at": {
+                        "type": "number",
+                        "description": "Unix timestamp (seconds since epoch) for when to send the reminder. Calculate this from the current time + requested delay."
+                    },
+                    "human_time": {
+                        "type": "string",
+                        "description": "Human-readable time description for confirmation, e.g. 'через 30 минут', 'завтра в 9:00'."
+                    }
+                },
+                "required": ["text", "remind_at", "human_time"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_reminders",
+            "description": (
+                "List all active (pending) reminders for the user. "
+                "Use when the user asks 'мои напоминания', 'какие напоминания', 'что запланировано'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_reminder",
+            "description": (
+                "Cancel a pending reminder by its ID. "
+                "Use when the user wants to cancel or delete a reminder. "
+                "First call list_reminders to show available reminders and their IDs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reminder_id": {
+                        "type": "integer",
+                        "description": "The ID of the reminder to cancel."
+                    }
+                },
+                "required": ["reminder_id"]
+            }
+        }
     }
 ]
 
@@ -227,6 +294,9 @@ def execute_tool(tool_name: str, arguments: dict, context: dict = None) -> str:
         "recall_memories": _exec_recall_memories,
         "draw_tarot_card": _exec_draw_tarot,
         "get_horoscope": _exec_get_horoscope,
+        "set_reminder": _exec_set_reminder,
+        "list_reminders": _exec_list_reminders,
+        "cancel_reminder": _exec_cancel_reminder,
     }
     
     executor = executors.get(tool_name)
@@ -363,3 +433,63 @@ def _exec_get_horoscope(args: dict, ctx: dict) -> str:
     if not sign:
         return "Error: no zodiac sign specified"
     return f"__HOROSCOPE__|{sign}"
+
+
+def _exec_set_reminder(args: dict, ctx: dict) -> str:
+    """Create a reminder in the database."""
+    text = args.get("text", "")
+    remind_at = args.get("remind_at", 0)
+    human_time = args.get("human_time", "")
+    user_id = ctx.get("user_id", 0)
+    
+    if not text or not remind_at or not user_id:
+        return "Error: missing text, remind_at or user_id"
+    
+    # Sanity check: remind_at should be in the future
+    if remind_at < time.time():
+        return "Error: remind_at is in the past. Please calculate a future timestamp."
+    
+    # Limit: max 30 days ahead
+    max_future = time.time() + 30 * 24 * 3600
+    if remind_at > max_future:
+        return "Error: reminder too far in the future (max 30 days)."
+    
+    reminder_id = create_reminder(user_id, text, remind_at)
+    if reminder_id:
+        return f"✅ Напоминание #{reminder_id} установлено: '{text}' — {human_time}."
+    return "Не удалось создать напоминание."
+
+
+def _exec_list_reminders(args: dict, ctx: dict) -> str:
+    """List all pending reminders for the user."""
+    user_id = ctx.get("user_id", 0)
+    if not user_id:
+        return "Error: no user_id"
+    
+    reminders = get_user_reminders(user_id, status="pending")
+    if not reminders:
+        return "У тебя нет активных напоминаний."
+    
+    import datetime
+    tz = datetime.timezone(datetime.timedelta(hours=3))  # Minsk UTC+3
+    
+    result = f"Активные напоминания ({len(reminders)}):\n"
+    for r in reminders:
+        dt = datetime.datetime.fromtimestamp(r['remind_at'], tz=tz)
+        time_str = dt.strftime('%d.%m.%Y %H:%M')
+        result += f"  #{r['id']} — {r['reminder_text']} (⏰ {time_str})\n"
+    return result
+
+
+def _exec_cancel_reminder(args: dict, ctx: dict) -> str:
+    """Cancel a reminder by ID."""
+    reminder_id = args.get("reminder_id", 0)
+    user_id = ctx.get("user_id", 0)
+    
+    if not reminder_id or not user_id:
+        return "Error: missing reminder_id or user_id"
+    
+    success = db_cancel_reminder(reminder_id, user_id)
+    if success:
+        return f"✅ Напоминание #{reminder_id} отменено."
+    return f"Напоминание #{reminder_id} не найдено или уже выполнено/отменено."
