@@ -3,6 +3,7 @@ import time
 import base64
 import random
 import tempfile
+import json
 import telebot
 from telebot import types
 import requests as http_requests
@@ -19,6 +20,11 @@ import openpyxl
 import zlib
 import phpserialize
 import xlrd
+
+# Agent modules
+from memory_manager import save_memory, search_memories, clear_user_memories
+from agent_tools import TOOLS, execute_tool
+
 try:
     from ddgs import DDGS
     DDGS_AVAILABLE = True
@@ -58,14 +64,23 @@ user_memory = {}
 MAX_HISTORY = 20
 
 SYSTEM_PROMPT = (
-    "Ты — полезный персональный ассистент. "
+    "Ты — умный персональный ассистент с доступом к инструментам. "
     "ВСЕГДА отвечай на русском языке, если пользователь не попросит иначе. "
     "Будь кратким, конкретным и дружелюбным. Избегай повторов и воды. "
     "Твой пользователь находится в Беларуси — учитывай это при ответах "
     "о ценах, валютах, новостях и законах, если не указано иное. "
-    "Если в сообщении пользователя есть [Контекст из интернета], "
-    "используй эту свежую информацию для ответа, но отвечай своими словами. "
-    "При использовании данных из интернета кратко укажи это. "
+    "\n\nУ тебя есть инструменты (tools). ИСПОЛЬЗУЙ ИХ АКТИВНО:\n"
+    "- search_web: Ищи в интернете, если вопрос про актуальные события, цены, новости, факты. НЕ УГАДЫВАЙ — ищи!\n"
+    "- read_webpage: Читай конкретную веб-страницу, если нужны детали.\n"
+    "- generate_image: Генерируй картинку по описанию ('нарисуй', 'изобрази').\n"
+    "- get_weather: Получай прогноз погоды для любого города.\n"
+    "- remember_fact: Сохраняй важные факты о пользователе в долгосрочную память.\n"
+    "- recall_memories: Вспоминай ранее сохранённые факты.\n"
+    "- draw_tarot_card: Вытяни карту Таро для гадания.\n"
+    "- get_horoscope: Составь гороскоп для знака зодиака.\n"
+    "\nКогда пользователь делится личной информацией (имя, предпочтения, аллергии, "
+    "день рождения), ОБЯЗАТЕЛЬНО вызови remember_fact.\n"
+    "Если пользователь задаёт вопрос, на который ты не уверен в ответе, вызови search_web.\n"
     "Если пользователь отправил изображение, в истории будет его описание — "
     "учитывай его при ответах на последующие вопросы."
 )
@@ -153,12 +168,18 @@ def generate_text_pollinations(messages):
         print(f"⚠️ Pollinations Text failed: {e}")
     return None
 
-def ask_llm_smart(messages, user_id=None):
+def ask_llm_smart(messages, user_id=None, tools=None):
     """
     Умная функция запроса к ИИ с автоматическим переключением провайдеров (Smart Fallback).
-    Порядок 2026: Groq (Llama 4) -> Qwen3 (если код) -> OpenRouter (Llama 3.3 / Gemma 4) -> Pollinations.
+    Порядок 2026: Groq (Llama 4) -> OpenRouter (Llama 3.3 / Gemma 4) -> Pollinations.
+    
+    Если tools переданы, возвращает ПОЛНЫЙ message object (может содержать tool_calls).
+    Если tools=None, возвращает строку (обычный текст).
     """
-    query_text = messages[-1]["content"].lower()
+    # Determine if this is a raw content request or needs last message parsing
+    last_content = messages[-1].get("content", "") if messages else ""
+    query_text = last_content.lower() if isinstance(last_content, str) else ""
+    
     code_triggers = ["код", "script", "программ", "python", "js", "html", "сайт", "лендинг", "напиши на", "sql"]
     is_coding_task = any(t in query_text for t in code_triggers)
 
@@ -168,8 +189,8 @@ def ask_llm_smart(messages, user_id=None):
         {"name": "OpenRouter (Gemma 4)", "client": openrouter_client, "model": "google/gemma-4-31b-it:free"}
     ]
 
-    # Если задача кодинга, вставляем Qwen3 в начало (после основной попытки или сразу)
-    if is_coding_task:
+    # Qwen3 for coding tasks (no tools support for Qwen, it's a code specialist)
+    if is_coding_task and not tools:
         qwen_provider = {"name": "Qwen3 Coder", "client": openrouter_client, "model": "qwen/qwen3-coder:free"}
         providers.insert(0, qwen_provider)
         if user_id:
@@ -181,25 +202,64 @@ def ask_llm_smart(messages, user_id=None):
             continue
             
         try:
-            print(f"Trying provider: {provider['name']}...")
-            completion = provider["client"].chat.completions.create(
-                model=provider["model"],
-                messages=messages,
-                temperature=0.7,
-                max_tokens=2048,
-            )
-            return completion.choices[0].message.content
+            print(f"Trying provider: {provider['name']}{'(+tools)' if tools else ''}...")
+            
+            kwargs = {
+                "model": provider["model"],
+                "messages": messages,
+                "temperature": 0.7,
+                "max_tokens": 2048,
+            }
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+            
+            completion = provider["client"].chat.completions.create(**kwargs)
+            msg = completion.choices[0].message
+            
+            # If tools were requested, return the full message object
+            if tools:
+                return msg
+            
+            # Otherwise return plain text
+            return msg.content or ""
+            
         except Exception as e:
-            print(f"⚠️ {provider['name']} failed: {e}")
+            error_str = str(e)
+            print(f"⚠️ {provider['name']} failed: {error_str}")
+            # If error is about tools not being supported, retry without tools
+            if tools and ("tool" in error_str.lower() or "function" in error_str.lower()):
+                print(f"  → Tools not supported by {provider['name']}, trying next...")
             continue
 
-    # Финальный сверхстабильный фоллбэк
+    # Финальный сверхстабильный фоллбэк (no tools support)
     print("Trying Pollinations as final fallback...")
     final_res = generate_text_pollinations(messages)
     if final_res:
+        if tools:
+            # Wrap in a fake message-like object for consistency
+            class FakeMsg:
+                content = final_res
+                tool_calls = None
+            return FakeMsg()
         return final_res
     
-    return "⚠️ К сожалению, все магические каналы связи сейчас перегружены. Попробуй через минуту."
+    fallback_text = "⚠️ К сожалению, все магические каналы связи сейчас перегружены. Попробуй через минуту."
+    if tools:
+        class FakeMsg:
+            content = fallback_text
+            tool_calls = None
+        return FakeMsg()
+    return fallback_text
+
+
+def ask_llm_simple(messages):
+    """
+    Простой запрос к LLM БЕЗ инструментов.
+    Используется для таро, гороскопов, перевода и других задач,
+    где tools не нужны.
+    """
+    return ask_llm_smart(messages, tools=None)
 
 def analyze_image_groq(base64_image, user_question="Опиши подробно, что ты видишь на этом изображении."):
     """Анализ изображения через Groq Vision (быстрый)."""
@@ -1148,51 +1208,125 @@ def handle_document(message):
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
+    """
+    Agent Loop: LLM решает, какие инструменты вызвать.
+    Нет жестких if/else — всё управляется через Function Calling.
+    """
     user_id = message.chat.id
     query = message.text
-    query_lower = query.lower()
     
-    # Фразовые триггеры для рисования (избегаем ложных срабатываний на "фото" и "создай")
-    draw_triggers = ["нарисуй", "изобрази", "сгенерируй картинк", "сгенерируй изображен",
-                     "создай картинк", "создай изображен", "нарисуй картинк"]
-    if any(trigger in query_lower for trigger in draw_triggers):
-        _generate_and_send_image(user_id, query, message)
-        return
-
-    # Триггер на погоду: "погода в Москве", "какая погода в Минске"
-    if "погод" in query_lower:
-        city, country = extract_city_from_text(query)
-        if city:
-            bot.send_chat_action(user_id, 'typing')
-            try:
-                weather_text, _ = get_weather(city, country)
-                if weather_text:
-                    safe_send_message(user_id, weather_text)
-                else:
-                    bot.reply_to(message, f"🔍 Город *{city}* не найден.", parse_mode="Markdown")
-            except Exception as e:
-                bot.reply_to(message, f"⚠️ Ошибка погоды: {e}")
-            return
-
     bot.send_chat_action(user_id, 'typing')
     
-    # Веб-поиск: проверяем, нужна ли свежая информация
-    search_context = ""
-    if needs_web_search(query):
-        search_context = perform_web_search(query)
-        if search_context:
-            print(f"🔍 Web search triggered for: {query[:50]}")
+    # 1. Обогащаем контекст долгосрочной памятью
+    memory_context = ""
+    try:
+        relevant_memories = search_memories(user_id, query, top_k=3, threshold=0.45)
+        if relevant_memories:
+            facts = "\n".join([f"- {m['fact_text']}" for m in relevant_memories])
+            memory_context = f"\n\n[Из долгосрочной памяти о пользователе]:\n{facts}"
+            print(f"🧠 Found {len(relevant_memories)} relevant memories for query")
+    except Exception as e:
+        print(f"⚠️ Memory search error: {e}")
     
-    # Добавляем в память с контекстом поиска (если есть)
-    if search_context:
-        enriched_query = f"{query}\n\n[Контекст из интернета]:\n{search_context}"
-        add_message_to_memory(user_id, "user", enriched_query)
+    # 2. Добавляем сообщение пользователя в контекст
+    user_message = query
+    if memory_context:
+        # Добавляем память как скрытый контекст (пользователь не видит)
+        user_message = f"{query}{memory_context}"
+    
+    add_message_to_memory(user_id, "user", user_message)
+    
+    # 3. Agent Loop: до 3 итераций tool_calls
+    messages_for_llm = get_memory(user_id).copy()
+    max_iterations = 3
+    
+    for iteration in range(max_iterations):
+        print(f"🤖 Agent Loop iteration {iteration + 1}/{max_iterations}")
+        
+        llm_response = ask_llm_smart(messages_for_llm, user_id=user_id, tools=TOOLS)
+        
+        # Проверяем, есть ли tool_calls
+        if not hasattr(llm_response, 'tool_calls') or not llm_response.tool_calls:
+            # LLM дала финальный текстовый ответ
+            final_text = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
+            if final_text:
+                safe_send_message(user_id, final_text)
+                add_message_to_memory(user_id, "assistant", final_text)
+            break
+        
+        # 4. Обрабатываем tool_calls
+        # Добавляем assistant message с tool_calls в контекст
+        assistant_msg = {
+            "role": "assistant",
+            "content": llm_response.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }
+                } for tc in llm_response.tool_calls
+            ]
+        }
+        messages_for_llm.append(assistant_msg)
+        
+        for tool_call in llm_response.tool_calls:
+            tool_name = tool_call.function.name
+            try:
+                tool_args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                tool_args = {}
+            
+            print(f"  🔧 Tool call: {tool_name}({tool_args})")
+            
+            # Execute the tool
+            tool_result = execute_tool(tool_name, tool_args, context={"user_id": user_id})
+            
+            # Handle special action markers
+            if tool_result.startswith("__IMAGE_GENERATION__|"):
+                prompt = tool_result.split("|", 1)[1]
+                _generate_and_send_image(user_id, prompt, message)
+                tool_result = f"Картинка сгенерирована по запросу: {prompt}"
+            
+            elif tool_result.startswith("__WEATHER__|"):
+                parts = tool_result.split("|")
+                city = parts[1] if len(parts) > 1 else ""
+                country = parts[2] if len(parts) > 2 else None
+                try:
+                    weather_text, display_name = get_weather(city, country if country else None)
+                    if weather_text:
+                        safe_send_message(user_id, weather_text)
+                        tool_result = f"Погода для {display_name} показана пользователю."
+                    else:
+                        tool_result = f"Город '{city}' не найден в базе Open-Meteo."
+                except Exception as e:
+                    tool_result = f"Ошибка получения погоды: {e}"
+            
+            elif tool_result == "__TAROT__":
+                card = random.choice(MAJOR_ARCANA)
+                is_reversed = random.choice([True, False])
+                position = "в перевёрнутом положении" if is_reversed else "в прямом положении"
+                tool_result = f"Выпала карта: {card['name']} ({card['en']}) {position}. Дай мистическую интерпретацию."
+            
+            elif tool_result.startswith("__HOROSCOPE__|"):
+                sign = tool_result.split("|", 1)[1]
+                tool_result = f"Составь подробный и загадочный гороскоп на сегодня для знака {sign}."
+            
+            # Add tool result to context
+            messages_for_llm.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(tool_result)
+            })
+        
+        # Continue loop — LLM will see tool results and may call more tools or give final answer
     else:
-        add_message_to_memory(user_id, "user", query)
-    
-    response = ask_llm_smart(get_memory(user_id), user_id=user_id)
-    safe_send_message(user_id, response)
-    add_message_to_memory(user_id, "assistant", response)
+        # Max iterations reached, send whatever we have
+        final_text = "Я обработал все инструменты, но не смог сформировать финальный ответ. Попробуй переформулировать вопрос."
+        safe_send_message(user_id, final_text)
+        add_message_to_memory(user_id, "assistant", final_text)
 
 if __name__ == "__main__":
     print("Бот запускается...")
