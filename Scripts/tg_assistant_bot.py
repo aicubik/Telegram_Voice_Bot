@@ -781,14 +781,14 @@ def cmd_test_jina(message):
     
     try:
         # 1. Тест Reader
-        r_resp = requests.get("https://r.jina.ai/https://example.com", 
-                              headers={"Authorization": f"Bearer {jina_key}"}, timeout=10)
+        r_resp = http_requests.get("https://r.jina.ai/https://example.com", 
+                                   headers={"Authorization": f"Bearer {jina_key}"}, timeout=10)
         reader_ok = "✅ OK" if r_resp.status_code == 200 else f"❌ Error {r_resp.status_code}"
         
         # 2. Тест Embeddings
-        e_resp = requests.post("https://api.jina.ai/v1/embeddings", 
-                               headers={"Authorization": f"Bearer {jina_key}", "Content-Type": "application/json"},
-                               json={"model": "jina-embeddings-v3", "input": ["test"]}, timeout=10)
+        e_resp = http_requests.post("https://api.jina.ai/v1/embeddings", 
+                                    headers={"Authorization": f"Bearer {jina_key}", "Content-Type": "application/json"},
+                                    json={"model": "jina-embeddings-v3", "input": ["test"]}, timeout=10)
         embed_ok = "✅ OK" if e_resp.status_code == 200 else f"❌ Error {e_resp.status_code}"
         
         result = (f"🔍 **Jina AI Status (Render Server):**\n\n"
