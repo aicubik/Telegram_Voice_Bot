@@ -73,11 +73,18 @@ SYSTEM_PROMPT = (
     "- search_web: Ищи в интернете, если вопрос про актуальные события, цены, новости, факты. НЕ УГАДЫВАЙ — ищи!\n"
     "- read_webpage: Читай конкретную веб-страницу, если нужны детали.\n"
     "- generate_image: Генерируй картинку по описанию ('нарисуй', 'изобрази').\n"
-    "- get_weather: Получай прогноз погоды для любого города.\n"
+    "- get_weather: Получай прогноз погоды для любого города. Если спрашивают про завтра — ставь forecast_days=2.\n"
     "- remember_fact: Сохраняй важные факты о пользователе в долгосрочную память.\n"
     "- recall_memories: Вспоминай ранее сохранённые факты.\n"
     "- draw_tarot_card: Вытяни карту Таро для гадания.\n"
     "- get_horoscope: Составь гороскоп для знака зодиака.\n"
+    "\nКРИТИЧЕСКИ ВАЖНО:\n"
+    "1. ВСЕГДА вызывай draw_tarot_card когда пользователь просит погадать, вытянуть карту, сделать расклад. "
+    "НИКОГДА не пиши текст про Таро без вызова инструмента!\n"
+    "2. ВСЕГДА вызывай get_weather когда спрашивают про погоду. "
+    "НИКОГДА не отвечай про погоду без вызова инструмента!\n"
+    "3. ВСЕГДА вызывай generate_image когда просят нарисовать. "
+    "НИКОГДА не описывай картинку текстом!\n"
     "\nКогда пользователь делится личной информацией (имя, предпочтения, аллергии, "
     "день рождения), ОБЯЗАТЕЛЬНО вызови remember_fact.\n"
     "Если пользователь задаёт вопрос, на который ты не уверен в ответе, вызови search_web.\n"
@@ -588,8 +595,10 @@ def _translate_city_to_english(city_text):
     except Exception:
         return city_text
 
-def get_weather(city_name, country_hint=None):
+def get_weather(city_name, country_hint=None, forecast_days=1):
     """Получить прогноз погоды для города через Open-Meteo (бесплатно)."""
+    forecast_days = max(1, min(int(forecast_days), 7))
+    
     # 1. Геокодинг: Сначала переводим в английский, так как Open-Meteo плохо ищет кириллицу (например, Бобруйск)
     search_query = _translate_city_to_english(city_name)
     geo_data = _geocode_city(search_query, country_hint)
@@ -607,13 +616,13 @@ def get_weather(city_name, country_hint=None):
     display_name = place.get("name", city_name)
     country = place.get("country", "")
     
-    # 2. Погода: координаты → текущие данные + прогноз на сегодня
+    # 2. Погода: координаты → текущие данные + прогноз
     weather_url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}"
         f"&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m"
-        f"&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_sum,wind_speed_10m_max"
-        f"&timezone=auto&forecast_days=1"
+        f"&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_sum,wind_speed_10m_max,weather_code"
+        f"&timezone=auto&forecast_days={forecast_days}"
     )
     w_resp = http_requests.get(weather_url, timeout=10)
     if w_resp.status_code != 200:
@@ -625,16 +634,48 @@ def get_weather(city_name, country_hint=None):
     
     weather_desc = WEATHER_CODES.get(cur.get("weather_code", 0), "🌡️ Нет данных")
     
-    text = (
-        f"🌤️ *Погода: {display_name}* ({country})\n\n"
-        f"{weather_desc}\n\n"
-        f"🌡️ Сейчас: *{cur['temperature_2m']}°C* (ощущается {cur['apparent_temperature']}°C)\n"
-        f"📊 Мин / Макс: {day['temperature_2m_min'][0]}°C / {day['temperature_2m_max'][0]}°C\n"
-        f"💧 Влажность: {cur['relative_humidity_2m']}%\n"
-        f"💨 Ветер: {cur['wind_speed_10m']} км/ч (порывы до {cur['wind_gusts_10m']} км/ч)\n"
-        f"🌧️ Осадки за день: {day['precipitation_sum'][0]} мм\n"
-        f"🌅 Восход: {day['sunrise'][0][-5:]}  🌇 Закат: {day['sunset'][0][-5:]}"
-    )
+    DAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    
+    if forecast_days == 1:
+        # Прогноз на 1 день — компактный формат (как было)
+        text = (
+            f"🌤️ *Погода: {display_name}* ({country})\n\n"
+            f"{weather_desc}\n\n"
+            f"🌡️ Сейчас: *{cur['temperature_2m']}°C* (ощущается {cur['apparent_temperature']}°C)\n"
+            f"📊 Мин / Макс: {day['temperature_2m_min'][0]}°C / {day['temperature_2m_max'][0]}°C\n"
+            f"💧 Влажность: {cur['relative_humidity_2m']}%\n"
+            f"💨 Ветер: {cur['wind_speed_10m']} км/ч (порывы до {cur['wind_gusts_10m']} км/ч)\n"
+            f"🌧️ Осадки за день: {day['precipitation_sum'][0]} мм\n"
+            f"🌅 Восход: {day['sunrise'][0][-5:]}  🌇 Закат: {day['sunset'][0][-5:]}"
+        )
+    else:
+        # Многодневный прогноз
+        from datetime import datetime
+        text = f"🌤️ *Погода: {display_name}* ({country})\n\n"
+        text += f"📍 Сейчас: *{cur['temperature_2m']}°C* (ощущается {cur['apparent_temperature']}°C)\n"
+        text += f"{weather_desc}  |  💧 {cur['relative_humidity_2m']}%  |  💨 {cur['wind_speed_10m']} км/ч\n"
+        text += f"\n📅 *Прогноз на {forecast_days} дн.:*\n"
+        
+        for i in range(forecast_days):
+            date_str = day["time"][i]  # "2026-04-15"
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                day_name = DAY_NAMES[dt.weekday()]
+                date_label = f"{day_name} {dt.day:02d}.{dt.month:02d}"
+            except:
+                date_label = date_str
+            
+            day_weather = WEATHER_CODES.get(day.get("weather_code", [0]*7)[i], "")
+            t_min = day['temperature_2m_min'][i]
+            t_max = day['temperature_2m_max'][i]
+            precip = day['precipitation_sum'][i]
+            
+            text += f"\n{day_weather} *{date_label}*: {t_min}°C…{t_max}°C"
+            if precip > 0:
+                text += f"  🌧️ {precip} мм"
+        
+        text += f"\n\n🌅 Восход: {day['sunrise'][0][-5:]}  🌇 Закат: {day['sunset'][0][-5:]}"
+    
     return text, display_name
 
 def _parse_city_country(raw):
@@ -1296,8 +1337,9 @@ def handle_text(message):
                 parts = tool_result.split("|")
                 city = parts[1] if len(parts) > 1 else ""
                 country = parts[2] if len(parts) > 2 else None
+                forecast_days = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
                 try:
-                    weather_text, display_name = get_weather(city, country if country else None)
+                    weather_text, display_name = get_weather(city, country if country else None, forecast_days=forecast_days)
                     if weather_text:
                         safe_send_message(user_id, weather_text)
                         tool_result = f"[СИСТЕМА] Подробный прогноз погоды для {display_name} УЖЕ отправлен пользователю отдельным сообщением. Верни СТРОГО один символ '✅' (галочку) и больше НИЧЕГО. Текст писать запрещено."

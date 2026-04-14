@@ -92,8 +92,11 @@ TOOLS = [
         "function": {
             "name": "get_weather",
             "description": (
-                "Get the current weather forecast for a specific city. "
+                "Get weather forecast for a specific city. "
                 "Use when the user asks about weather, temperature, rain, wind, etc. "
+                "Supports forecasts from 1 to 7 days ahead. "
+                "If user asks about tomorrow, set forecast_days=2. "
+                "If user asks about weather for the next 3 days, set forecast_days=3. "
                 "Default to Belarus if no country is specified."
             ),
             "parameters": {
@@ -106,6 +109,10 @@ TOOLS = [
                     "country_hint": {
                         "type": "string",
                         "description": "Optional country name for disambiguation (e.g., 'Беларусь', 'Россия')."
+                    },
+                    "forecast_days": {
+                        "type": "integer",
+                        "description": "Number of days to forecast (1=today only, 2=today+tomorrow, up to 7). Default: 1."
                     }
                 },
                 "required": ["city"]
@@ -160,8 +167,11 @@ TOOLS = [
         "function": {
             "name": "draw_tarot_card",
             "description": (
-                "Draw a random Tarot card and generate its mystical interpretation. "
-                "Use when the user asks for a tarot reading, fortune telling, or card guidance."
+                "Draw a random Tarot card and generate its mystical interpretation with an image. "
+                "YOU MUST ALWAYS call this tool when the user asks for tarot, fortune telling, "
+                "card reading, or says 'погадай', 'погадай мне', 'вытяни карту', 'расклад'. "
+                "NEVER try to do a tarot reading yourself — ALWAYS use this tool. "
+                "The tool will generate a card image and return the card info for your interpretation."
             ),
             "parameters": {
                 "type": "object",
@@ -303,9 +313,10 @@ def _exec_get_weather(args: dict, ctx: dict) -> str:
     """
     city = args.get("city", "")
     country = args.get("country_hint", "")
+    forecast_days = args.get("forecast_days", 1)
     if not city:
         return "Error: empty city name"
-    return f"__WEATHER__|{city}|{country}"
+    return f"__WEATHER__|{city}|{country}|{forecast_days}"
 
 
 def _exec_remember_fact(args: dict, ctx: dict) -> str:
