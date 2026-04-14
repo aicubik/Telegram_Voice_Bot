@@ -1249,9 +1249,11 @@ def handle_text(message):
         if not hasattr(llm_response, 'tool_calls') or not llm_response.tool_calls:
             # LLM дала финальный текстовый ответ
             final_text = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
-            if final_text:
+            if final_text and final_text.strip() != "✅":
                 safe_send_message(user_id, final_text)
                 add_message_to_memory(user_id, "assistant", final_text)
+            elif final_text and final_text.strip() == "✅":
+                add_message_to_memory(user_id, "assistant", "✅ (Выполнено)")
             break
         
         # 4. Обрабатываем tool_calls
@@ -1288,7 +1290,7 @@ def handle_text(message):
             if tool_result.startswith("__IMAGE_GENERATION__|"):
                 prompt = tool_result.split("|", 1)[1]
                 _generate_and_send_image(user_id, prompt, message)
-                tool_result = f"[СИСТЕМА] Картинка успешно сгенерирована по запросу: {prompt} и отправлена. Подтверди это коротким сообщением (например, 'Вот ваша картинка!') и ничего больше."
+                tool_result = f"[СИСТЕМА] Картинка успешно сгенерирована по запросу: {prompt} и отправлена. Верни СТРОГО один символ '✅' (галочку) и больше НИЧЕГО. Текст писать запрещено."
             
             elif tool_result.startswith("__WEATHER__|"):
                 parts = tool_result.split("|")
@@ -1298,7 +1300,7 @@ def handle_text(message):
                     weather_text, display_name = get_weather(city, country if country else None)
                     if weather_text:
                         safe_send_message(user_id, weather_text)
-                        tool_result = f"[СИСТЕМА] Подробный прогноз погоды для {display_name} УЖЕ отправлен пользователю отдельным сообщением. Просто скажи коротко 'Вот погода!' и не дублируй прогноз."
+                        tool_result = f"[СИСТЕМА] Подробный прогноз погоды для {display_name} УЖЕ отправлен пользователю отдельным сообщением. Верни СТРОГО один символ '✅' (галочку) и больше НИЧЕГО. Текст писать запрещено."
                     else:
                         tool_result = f"Город '{city}' не найден в базе Open-Meteo."
                 except Exception as e:
@@ -1308,7 +1310,23 @@ def handle_text(message):
                 card = random.choice(MAJOR_ARCANA)
                 is_reversed = random.choice([True, False])
                 position = "в перевёрнутом положении" if is_reversed else "в прямом положении"
-                tool_result = f"[СИСТЕМА] Выпала карта: {card['name']} ({card['en']}) {position}. Напиши для неё красивую мистическую интерпретацию. ПИШИ ТОЛЬКО ТЕКСТ ИНТЕРПРЕТАЦИИ, без технических тегов типа <output>."
+                reversed_tag = " (Перевёрнутая)" if is_reversed else ""
+                
+                status_msg = bot.send_message(user_id, "🔮 Карты перемешиваются...")
+                
+                try:
+                    card_prompt = f"Mystical tarot card '{card['en']}', Major Arcana, occult style, detailed illustration, {'reversed' if is_reversed else ''}"
+                    image_bytes = generate_image_pollinations_auth(card_prompt, "flux")
+                    if image_bytes:
+                        bot.send_photo(user_id, image_bytes, caption=f"🃏 Вы вытянули карту: *{card['name']}{reversed_tag}*", parse_mode="Markdown")
+                except Exception as e:
+                    print(f"Tarot image generation failed: {e}")
+                
+                try:
+                    bot.delete_message(user_id, status_msg.message_id)
+                except: pass
+                
+                tool_result = f"[СИСТЕМА] Выпала карта: {card['name']} ({card['en']}) {position}. Изображение карты УЖЕ отправлено. Напиши для неё красивую мистическую интерпретацию. ПИШИ ТОЛЬКО ТЕКСТ ИНТЕРПРЕТАЦИИ, без технических тегов типа <output>."
             
             elif tool_result.startswith("__HOROSCOPE__|"):
                 sign = tool_result.split("|", 1)[1]
