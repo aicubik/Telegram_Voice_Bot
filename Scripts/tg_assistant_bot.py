@@ -768,6 +768,37 @@ def clear_context(message):
     user_memory[message.chat.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     bot.reply_to(message, "🧹 Контекст диалога очищен.")
 
+@bot.message_handler(commands=['test_jina'])
+def cmd_test_jina(message):
+    """Тест работоспособности Jina AI напрямую с сервера Render."""
+    user_id = message.chat.id
+    jina_key = os.getenv("JINA_API_KEY")
+    if not jina_key:
+        bot.reply_to(message, "❌ JINA_API_KEY не найден в переменных окружения на Render!")
+        return
+        
+    bot.reply_to(message, "⏳ Проверяю связь с Jina AI с IP-адреса сервера...")
+    
+    try:
+        # 1. Тест Reader
+        r_resp = requests.get("https://r.jina.ai/https://example.com", 
+                              headers={"Authorization": f"Bearer {jina_key}"}, timeout=10)
+        reader_ok = "✅ OK" if r_resp.status_code == 200 else f"❌ Error {r_resp.status_code}"
+        
+        # 2. Тест Embeddings
+        e_resp = requests.post("https://api.jina.ai/v1/embeddings", 
+                               headers={"Authorization": f"Bearer {jina_key}", "Content-Type": "application/json"},
+                               json={"model": "jina-embeddings-v3", "input": ["test"]}, timeout=10)
+        embed_ok = "✅ OK" if e_resp.status_code == 200 else f"❌ Error {e_resp.status_code}"
+        
+        result = (f"🔍 **Jina AI Status (Render Server):**\n\n"
+                  f"📄 Reader: {reader_ok}\n"
+                  f"🧠 Embeddings: {embed_ok}\n\n"
+                  f"Если оба OK — значит сервер имеет доступ к Jina!")
+        bot.reply_to(message, result, parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"🚨 Ошибка теста на сервере: {e}")
+
 @bot.message_handler(commands=['draw', 'flux'])
 def handle_draw_command(message):
     user_id = message.chat.id
