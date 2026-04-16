@@ -13,11 +13,21 @@ import os
 import json
 import random
 import time
+import re
+import requests as http_requests
 from memory_manager import (
     save_memory, search_memories, jina_search, jina_read_url,
     get_all_memories, clear_user_memories,
     create_reminder, get_user_reminders, cancel_reminder as db_cancel_reminder
 )
+
+try:
+    from ddgs import DDGS
+    DDGS_AVAILABLE = True
+except ImportError:
+    DDGS_AVAILABLE = False
+
+DEFAULT_REGION = "Беларусь"
 
 # ============================================================
 # TOOL DEFINITIONS (JSON schemas for LLM)
@@ -311,47 +321,119 @@ def execute_tool(tool_name: str, arguments: dict, context: dict = None) -> str:
 
 # --- Individual Executors ---
 
-def _exec_search_web(args: dict, ctx: dict) -> str:
-    """Execute web search via Jina, with fallback to Serper."""
-    query = args.get("query", "")
-    if not query:
-        return "Error: empty search query"
-    
-    # Try Jina Search first
-    result = jina_search(query, max_results=3)
-    
-    # Fallback to Serper if Jina fails
-    if not result:
-        result = _serper_search_fallback(query)
-    
-    return result if result else "Поиск не дал результатов."
+def localize_search_query(query):
+    """Добавляет регион к запросу, если тема касается локальных новостей/цен."""
+    q_lower = query.lower()
+    regional_topics = [
+        "погода", "новости", "курс", "цена", "купить", "билет", 
+        "кино", "афиша", "закон", "налог", "ваканси",
+        "зарплат", "пенси", "пособи",
+    ]
+    if any(topic in q_lower for topic in regional_topics):
+        if "беларусь" not in q_lower and "рб" not in q_lower and "минск" not in q_lower:
+            return f"{query} {DEFAULT_REGION}"
+    return query
 
+def _search_ddgs(search_query):
+    """Попытка поиска через библиотеку ddgs."""
+    if not DDGS_AVAILABLE:
+        return []
+    try:
+        results = list(DDGS().text(search_query, max_results=3))
+        return [{"title": r.get("title", ""), "body": r.get("body", "")} for r in results]
+    except Exception as e:
+        print(f"⚠️ DDGS library failed: {e}")
+        return []
 
-def _serper_search_fallback(query: str) -> str:
-    """Fallback search via Serper.dev API."""
-    import requests as http_requests
+def _search_html_fallback(search_query):
+    """Фоллбэк: прямой запрос к HTML-версии DuckDuckGo."""
+    try:
+        url = "https://html.duckduckgo.com/html/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Referer": "https://duckduckgo.com/"
+        }
+        resp = http_requests.post(url, data={"q": search_query}, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return []
+        
+        results = []
+        snippets = re.findall(
+            r'class="result__a"[^>]*>([^<]+)</a>.*?class="result__snippet"[^>]*>(.*?)</span>',
+            resp.text, re.DOTALL
+        )
+        for title, body in snippets[:3]:
+            clean_body = re.sub(r'<[^>]+>', '', body).strip()
+            results.append({"title": title.strip(), "body": clean_body})
+        return results
+    except Exception as e:
+        print(f"⚠️ DDG HTML fallback failed: {e}")
+        return []
+
+def _search_serper(search_query):
+    """Поиск через Serper.dev API (Google)."""
     api_key = os.getenv("SERPER_API_KEY")
     if not api_key:
-        return ""
+        return []
     try:
-        resp = http_requests.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            json={"q": query, "gl": "by", "hl": "ru", "num": 3},
-            timeout=10
-        )
+        url = "https://google.serper.dev/search"
+        headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+        payload = json.dumps({"q": search_query, "gl": "by", "hl": "ru", "num": 3})
+        resp = http_requests.post(url, headers=headers, data=payload, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             results = []
             answer = data.get("answerBox", {})
             if answer and "answer" in answer:
-                results.append(f"Прямой ответ: {answer['answer']}")
+                results.append({"title": "Прямой ответ", "body": answer["answer"]})
+            elif answer and "snippet" in answer:
+                results.append({"title": "Краткий ответ", "body": answer["snippet"]})
+            
+            kg = data.get("knowledgeGraph", {})
+            if kg and "description" in kg:
+                results.append({"title": kg.get("title", "Факт"), "body": kg["description"]})
+
             for r in data.get("organic", [])[:3]:
-                results.append(f"- {r.get('title', '')}: {r.get('snippet', '')}")
-            return "\n".join(results) if results else ""
-        return ""
-    except Exception:
-        return ""
+                if len(results) >= 4: break
+                results.append({"title": r.get("title", ""), "body": r.get("snippet", "")})
+            return results
+        return []
+    except Exception as e:
+        print(f"⚠️ Serper search failed: {e}")
+        return []
+
+def perform_web_search(query):
+    """Единая точка входа для поиска с каскадными фоллбэками и маркерами."""
+    search_query = localize_search_query(query)
+    print(f"🔍 Унифицированный поиск: {search_query}")
+    
+    # Каскад: Serper -> DDGS -> HTML
+    results = _search_serper(search_query)
+    if not results:
+        results = _search_ddgs(search_query)
+    if not results:
+        results = _search_html_fallback(search_query)
+    
+    if not results:
+        # Последний шанс: Jina (если она еще работает в этом окружении)
+        jina_res = jina_search(search_query, max_results=3)
+        if jina_res:
+            return f"\n=== SEARCH DATA START ===\n{jina_res}\n=== SEARCH DATA END ===\n"
+        return "Поиск не дал результатов."
+    
+    context = "\n=== SEARCH DATA START ===\n"
+    context += f"🔍 Результаты веб-поиска для запроса: {search_query}\n"
+    for i, r in enumerate(results, 1):
+        context += f"{i}. {r['title']}: {r['body']}\n"
+    context += "=== SEARCH DATA END ===\n"
+    return context
+
+def _exec_search_web(args: dict, ctx: dict) -> str:
+    """Инструмент Agent Loop: Использование унифицированного поиска."""
+    query = args.get("query", "")
+    if not query:
+        return "Error: empty search query"
+    return perform_web_search(query)
 
 
 def _exec_read_webpage(args: dict, ctx: dict) -> str:

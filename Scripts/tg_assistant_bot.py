@@ -26,14 +26,7 @@ import xlrd
 # Agent modules
 from memory_manager import save_memory, search_memories, clear_user_memories
 from memory_manager import get_due_reminders, mark_reminder_sent
-from agent_tools import TOOLS, execute_tool
-
-try:
-    from ddgs import DDGS
-    DDGS_AVAILABLE = True
-except ImportError:
-    DDGS_AVAILABLE = False
-    print("⚠️ ddgs not installed, using HTML fallback only")
+from agent_tools import TOOLS, execute_tool, perform_web_search
 
 # 1. Загрузка конфигураций
 load_dotenv('../Credentials.env')
@@ -301,6 +294,16 @@ def analyze_image_groq(base64_image, user_question="Опиши подробно,
     )
     return completion.choices[0].message.content
 
+def is_search_needed(query):
+    """Определить, нужен ли поиск."""
+    q = query.lower()
+    has_time = any(t in q for t in ["сейчас", "сегодня", "завтра", "актуаль", "курс", "цена"])
+    info_topics = ["кино", "сеанс", "билет", "новости", "события", "курс", "доллар", "евро", "бензин"]
+    has_topic = any(t in q for t in info_topics)
+    return has_time and has_topic
+
+DEFAULT_REGION = "Беларусь"
+
 def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma-3-27b-it:free"):
     """Анализ изображения через OpenRouter (Gemma 3 27B Free для точного OCR)."""
     messages = [
@@ -407,131 +410,7 @@ def localize_search_query(query):
         "цена", "стоимость", "стоит", "бензин", "топлив",
         "новост", "событи", "произошл",
         "закон", "указ", "постановлен", "выбор",
-        "зарплат", "пенси", "пособи", "налог",
-    ]
-    
-    if any(topic in q_lower for topic in regional_topics):
-        return f"{query} {DEFAULT_REGION}"
-    
-    return query
-
-def _search_ddgs(search_query):
-    """Попытка поиска через библиотеку ddgs."""
-    if not DDGS_AVAILABLE:
-        return []
-    try:
-        results = list(DDGS().text(search_query, max_results=3))
-        return [{"title": r.get("title", ""), "body": r.get("body", "")} for r in results]
-    except Exception as e:
-        print(f"⚠️ DDGS library failed: {e}")
-        return []
-
-def _search_html_fallback(search_query):
-    """Фоллбэк: прямой запрос к HTML-версии DuckDuckGo."""
-    try:
-        url = "https://html.duckduckgo.com/html/"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Referer": "https://duckduckgo.com/"
-        }
-        resp = http_requests.post(url, data={"q": search_query}, headers=headers, timeout=10)
-        if resp.status_code != 200:
-            print(f"⚠️ DDG HTML returned {resp.status_code}")
-            return []
-        
-        # Парсим результаты без BeautifulSoup (regex)
-        results = []
-        # Ищем блоки результатов
-        snippets = re.findall(
-            r'class="result__a"[^>]*>([^<]+)</a>.*?class="result__snippet"[^>]*>(.*?)</span>',
-            resp.text, re.DOTALL
-        )
-        for title, body in snippets[:3]:
-            # Убираем HTML-теги из body
-            clean_body = re.sub(r'<[^>]+>', '', body).strip()
-            results.append({"title": title.strip(), "body": clean_body})
-        return results
-    except Exception as e:
-        print(f"⚠️ DDG HTML fallback failed: {e}")
-        return []
-
-def _search_serper(search_query):
-    """Поиск через Serper.dev API (Google)."""
-    api_key = os.getenv("SERPER_API_KEY")
-    if not api_key:
-        return []
-    try:
-        url = "https://google.serper.dev/search"
-        headers = {
-            "X-API-KEY": api_key,
-            "Content-Type": "application/json"
-        }
-        import json
-        payload = json.dumps({
-            "q": search_query,
-            "gl": "by",
-            "hl": "ru",
-            "num": 3
-        })
-        resp = http_requests.post(url, headers=headers, data=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            organic = data.get("organic", [])
-            
-            results = []
-            
-            # Точные ответы
-            answer = data.get("answerBox", {})
-            if answer and "answer" in answer:
-                results.append({"title": "Прямой ответ", "body": answer["answer"]})
-            elif answer and "snippet" in answer:
-                results.append({"title": "Краткий ответ", "body": answer["snippet"]})
-            
-            # Knowledge graph
-            kg = data.get("knowledgeGraph", {})
-            if kg and "description" in kg:
-                results.append({"title": kg.get("title", "Факт"), "body": kg["description"]})
-
-            # Обычная выдача
-            for r in organic[:3]:
-                if len(results) >= 4:
-                    break
-                results.append({"title": r.get("title", ""), "body": r.get("snippet", "")})
-                
-            return results
-        else:
-            print(f"⚠️ Serper API returned {resp.status_code}: {resp.text}")
-            return []
-    except Exception as e:
-        print(f"⚠️ Serper search failed: {e}")
-        return []
-
-def perform_web_search(query):
-    """Выполнить поиск через Serper.dev (с фоллбэком на DuckDuckGo)."""
-    search_query = localize_search_query(query)
-    print(f"🔍 Searching: {search_query}")
-    
-    # Цепочка: Serper → ddgs → HTML скрапинг
-    results = _search_serper(search_query)
-    
-    if not results:
-        print("🔄 Serper failed, trying DDGS library...")
-        results = _search_ddgs(search_query)
-        
-    if not results:
-        print("🔄 DDGS failed, trying HTML fallback...")
-        results = _search_html_fallback(search_query)
-    
-    if not results:
-        print("❌ All search methods failed")
-        return ""
-    
-    context = "\n=== SEARCH DATA START ===\n"
-    context += f"🔍 Результаты веб-поиска для запроса: {search_query}\n"
-    for i, r in enumerate(results, 1):
-        context += f"{i}. {r['title']}: {r['body']}\n"
-    context += "=== SEARCH DATA END ===\n"
-    return context
+DEFAULT_REGION = "Беларусь"
 
 # --- Погода (Open-Meteo, бесплатно, без ключа) ---
 
