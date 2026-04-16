@@ -201,13 +201,15 @@ def ask_llm_smart(messages, user_id=None, tools=None):
     """
     # Determine if this is a raw content request or needs last message parsing
     last_content = messages[-1].get("content", "") if messages else ""
-    query_text = last_content.lower() if isinstance(last_content, str) else ""
+    # Strip memory and system injections before checking for triggers
+    import re
+    user_prompt_only = re.split(r"\[Из долгосрочной памяти|Текущее время:", last_content)[0].lower() if isinstance(last_content, str) else ""
     
     code_triggers = ["код", "script", "программ", "python", "js", "html", "сайт", "лендинг", "напиши на", "sql"]
-    is_coding_task = any(t in query_text for t in code_triggers)
+    is_coding_task = any(t in user_prompt_only for t in code_triggers)
 
     providers = [
-        {"name": "Groq (GPT-OSS 120b)", "client": groq_client, "model": "openai/gpt-oss-120b"},
+        {"name": "OpenRouter (GPT-OSS 120b)", "client": openrouter_client, "model": "openai/gpt-oss-120b:free"},
         {"name": "Groq (Llama 3.3)", "client": groq_client, "model": "llama-3.3-70b-versatile"},
         {"name": "OpenRouter (Nemotron 3 Super)", "client": openrouter_client, "model": "nvidia/nemotron-3-super-120b-a12b:free"},
         {"name": "OpenRouter (GLM 4.5 Air)", "client": openrouter_client, "model": "z-ai/glm-4.5-air:free"}
@@ -1448,14 +1450,22 @@ def handle_text(message):
             # LLM дала финальный текстовый ответ.
             final_text = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
             
-            # Prevent leaking system statuses to the user
-            clean_text = final_text.strip()
+            # Prevent leaking internal thoughts (<think> tags from models like DeepSeek-R1 / GPT-OSS) to the user
+            # Also handle unclosed tags if the output hits max_tokens before closing
+            clean_text = re.sub(r'<think>.*?(?:</think>|$)', '', final_text, flags=re.DOTALL | re.IGNORECASE).strip()
+            
+            # Remove memory injection artifacts if they leaked into the response
+            clean_text = re.sub(r'\[Из долгосрочной памяти о пользователе\]:.*', '', clean_text, flags=re.DOTALL).strip()
             
             # Simple heuristic for JSON tool calls that leaked as content
             extracted_tool = None
-            if clean_text.startswith("{") and clean_text.endswith("}"):
+            extracted_args = {}
+            
+            # Parse JSON anywhere in text to handle models that wrap JSON in markdown or plain text
+            json_match = re.search(r'\{[\s\S]*\}', clean_text)
+            if json_match:
                 try:
-                    data = json.loads(clean_text)
+                    data = json.loads(json_match.group(0))
                     if "name" in data and "arguments" in data:
                         extracted_tool = data["name"]
                         extracted_args = data["arguments"]
@@ -1596,12 +1606,23 @@ def _reminder_watchdog():
                     tz_minsk = datetime.timezone(datetime.timedelta(hours=3))
                     set_time = datetime.datetime.fromtimestamp(r['remind_at'], tz=tz_minsk).strftime('%H:%M')
                     msg = f"⏰ *Напоминание!*\n\n📝 {r['reminder_text']}\n🕐 Установлено на {set_time}"
-                    safe_send_message(r['user_id'], msg)
-                    mark_reminder_sent(r['id'])
-                    print(f"  ✅ Reminder #{r['id']} sent to user {r['user_id']}")
+                    
+                    # Mark reminder as sent BEFORE sending the Telegram message
+                    # This prevents double-sending if DB is temporarily locked.
+                    success = False
+                    for _ in range(3): # Simple retry for WAL locks
+                        if mark_reminder_sent(r['id']):
+                            success = True
+                            break
+                        time.sleep(1)
+                        
+                    if success:
+                        safe_send_message(r['user_id'], msg)
+                        print(f"  ✅ Reminder #{r['id']} sent to user {r['user_id']}")
+                    else:
+                        print(f"  ⚠️ DB locked repeatedly, skipping reminder #{r['id']} for next cycle.")
                 except Exception as e:
-                    print(f"  ⚠️ Failed to send reminder #{r['id']}: {e}")
-                    # Don't mark as sent — will retry next cycle
+                    print(f"  ⚠️ Failed to process reminder #{r['id']}: {e}")
         except Exception as e:
             print(f"⚠️ Reminder watchdog error: {e}")
         
