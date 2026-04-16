@@ -1333,6 +1333,18 @@ def handle_text(message):
             # Remove memory injection artifacts if they leaked into the response
             clean_text = re.sub(r'\[Из долгосрочной памяти о пользователе\]:.*', '', clean_text, flags=re.DOTALL).strip()
             
+            # Strip leaked JSON reasoning schemas robustly (even with preambles)
+            stripped_lower = clean_text.lower().replace(" ", "").replace("\n", "")
+            if '"role":"assistant"' in stripped_lower and ('"reasoningcontent"' in stripped_lower or '"toolcalls"' in stripped_lower):
+                clean_text = "" # Suppress leaked API object
+            elif clean_text.strip().startswith('{') and clean_text.strip().endswith('}'):
+                try:
+                    data = json.loads(clean_text)
+                    if isinstance(data, dict) and data.get("role") == "assistant":
+                        clean_text = "" 
+                except json.JSONDecodeError:
+                    pass
+            
             # Simple heuristic for JSON tool calls that leaked as content
             extracted_tool = None
             extracted_args = {}
