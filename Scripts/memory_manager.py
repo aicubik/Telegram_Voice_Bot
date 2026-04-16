@@ -27,8 +27,8 @@ JINA_EMBED_MODEL = "jina-embeddings-v3"
 EMBED_DIM = 1024  # Dimension of jina-embeddings-v3
 
 # --- Database Setup ---
-
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assistant_data.db")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.normpath(os.path.join(PROJECT_ROOT, "assistant_data.db"))
 
 def _get_db():
     """Get database connection with WAL mode for performance."""

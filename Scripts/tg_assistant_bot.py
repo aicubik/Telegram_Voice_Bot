@@ -213,7 +213,8 @@ def ask_llm_smart(messages, user_id=None, tools=None):
     ]
 
     # Qwen3 for coding tasks (no tools support for Qwen, it's a code specialist)
-    if is_coding_task and not tools:
+    # Qwen3 for coding tasks
+    if is_coding_task:
         qwen_provider = {"name": "Qwen3 Coder", "client": openrouter_client, "model": "qwen/qwen3-coder:free"}
         providers.insert(0, qwen_provider)
         if user_id:
@@ -1443,13 +1444,16 @@ def handle_text(message):
         
         # Проверяем, есть ли tool_calls
         if not hasattr(llm_response, 'tool_calls') or not llm_response.tool_calls:
-            # LLM дала финальный текстовый ответ
+            # LLM дала финальный текстовый ответ.
             final_text = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
-            if final_text and final_text.strip() != "✅":
-                safe_send_message(user_id, final_text)
-                add_message_to_memory(user_id, "assistant", final_text)
-            elif final_text and final_text.strip() == "✅":
-                add_message_to_memory(user_id, "assistant", "✅ (Выполнено)")
+            
+            # Prevent leaking system statuses to the user
+            clean_text = final_text.strip()
+            if clean_text and not clean_text.startswith("✅") and not clean_text.startswith("[СИСТЕМА]"):
+                safe_send_message(user_id, clean_text)
+                add_message_to_memory(user_id, "assistant", clean_text)
+            elif clean_text.startswith("✅"):
+                 add_message_to_memory(user_id, "assistant", "✅ (Выполнено)")
             break
         
         # 4. Обрабатываем tool_calls
