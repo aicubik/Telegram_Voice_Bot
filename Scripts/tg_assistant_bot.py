@@ -1314,6 +1314,7 @@ def handle_text(message):
         }
     
     max_iterations = 3
+    called_tools = set()
     
     for iteration in range(max_iterations):
         print(f"🤖 Agent Loop iteration {iteration + 1}/{max_iterations}")
@@ -1373,6 +1374,10 @@ def handle_text(message):
                     add_message_to_memory(user_id, "assistant", clean_text)
                 elif clean_text.startswith("✅"):
                      add_message_to_memory(user_id, "assistant", "✅ (Выполнено)")
+                elif not clean_text:
+                    # Prevent endless loop if all content is empty and no tools are matched
+                    safe_send_message(user_id, "Я не смог найти нужную информацию. Уточните ваш запрос.")
+                    add_message_to_memory(user_id, "assistant", "Я не смог найти нужную информацию.")
                 break
         
         # 4. Обрабатываем tool_calls
@@ -1400,10 +1405,17 @@ def handle_text(message):
             except json.JSONDecodeError:
                 tool_args = {}
             
-            print(f"  🔧 Tool call: {tool_name}({tool_args})")
-            
-            # Execute the tool
-            tool_result = execute_tool(tool_name, tool_args, context={"user_id": user_id})
+            tool_sig = f"{tool_name}:{tool_call.function.arguments}"
+            if tool_sig in called_tools:
+                print(f"  🔧 Prevented duplicate tool call: {tool_name}")
+                tool_result = "[СИСТЕМА] ОШИБКА: ТЫ УЖЕ ВЫЗЫВАЛ ЭТОТ ИНСТРУМЕНТ С ЭТИМИ АРГУМЕНТАМИ В ЭТОМ ЦИКЛЕ. ПОИСКО НЕ ДАЛ РЕЗУЛЬТАТОВ ИЛИ НИЧЕГО НЕ ИЗМЕНИЛОСЬ. ДАЙ ПОЛЬЗОВАТЕЛЮ ТЕКСТОВЫЙ ОТВЕТ С ЧЕСТНЫМ 'ИНФОРМАЦИЯ НЕ НАЙДЕНА'."
+            else:
+                called_tools.add(tool_sig)
+                print(f"  🔧 Tool call: {tool_name}({tool_args})")
+                
+                # Execute the tool
+                tool_result = execute_tool(tool_name, tool_args, context={"user_id": user_id})
+
             
             # Handle special action markers
             if tool_result.startswith("__IMAGE_GENERATION__|"):
