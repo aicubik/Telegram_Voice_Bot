@@ -67,11 +67,17 @@ user_memory = {}
 MAX_HISTORY = 20
 
 SYSTEM_PROMPT = (
-    "Ты — умный персональный ассистент с доступом к инструментам. "
+    "Ты — самый умный и честный персональный ассистент с доступом к инструментам (AI Agent 2026). "
     "ВСЕГДА отвечай на русском языке, если пользователь не попросит иначе. "
     "Будь кратким, конкретным и дружелюбным. Избегай повторов и воды. "
     "Твой пользователь находится в Беларуси (UTC+3) — учитывай это при ответах "
     "о ценах, валютах, новостях и законах, если не указано иное. "
+    "\n\nПРАВИЛО 'ЖЁСТКОЙ ПРАВДЫ' (HARD TRUTH):\n"
+    "1. ТЕБЕ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО ВЫДУМЫВАТЬ ФАКТЫ. "
+    "Если ты используешь search_web и результаты пустые или не содержат нужной информации (например, расписания конкретного кинотеатра на сегодня), "
+    "ты ОБЯЗАН прямо сказать: 'К сожалению, актуальных данных о [тема] сейчас нет'. "
+    "2. НИКОГДА не выдумывай названия фильмов, имена людей, цены или адреса, если их нет в контексте поиска! "
+    "3. Если поиск не дал ответа, не делай предположений — это считается галлюцинацией и ошибкой.\n"
     "\n\nУ тебя есть инструменты (tools). ИСПОЛЬЗУЙ ИХ АКТИВНО:\n"
     "- search_web: Ищи в интернете, если вопрос про актуальные события, цены, новости, факты. НЕ УГАДЫВАЙ — ищи!\n"
     "- read_webpage: Читай конкретную веб-страницу, если нужны детали.\n"
@@ -199,14 +205,6 @@ def ask_llm_smart(messages, user_id=None, tools=None):
     Если tools переданы, возвращает ПОЛНЫЙ message object (может содержать tool_calls).
     Если tools=None, возвращает строку (обычный текст).
     """
-    # Determine if this is a raw content request or needs last message parsing
-    last_content = messages[-1].get("content", "") if messages else ""
-    # Strip memory and system injections before checking for triggers
-    import re
-    user_prompt_only = re.split(r"\[Из долгосрочной памяти|Текущее время:", last_content)[0].lower() if isinstance(last_content, str) else ""
-    
-    code_triggers = ["код", "script", "программ", "python", "js", "html", "сайт", "лендинг", "напиши на", "sql"]
-    is_coding_task = any(t in user_prompt_only for t in code_triggers)
 
     providers = [
         {"name": "OpenRouter (GPT-OSS 120b)", "client": openrouter_client, "model": "openai/gpt-oss-120b:free"},
@@ -214,15 +212,6 @@ def ask_llm_smart(messages, user_id=None, tools=None):
         {"name": "OpenRouter (Nemotron 3 Super)", "client": openrouter_client, "model": "nvidia/nemotron-3-super-120b-a12b:free"},
         {"name": "OpenRouter (GLM 4.5 Air)", "client": openrouter_client, "model": "z-ai/glm-4.5-air:free"}
     ]
-
-    # Qwen3 for coding tasks (no tools support for Qwen, it's a code specialist)
-    # Coding specialist models
-    if is_coding_task:
-        coding_provider = {"name": "OR (MiniMax M2.5)", "client": openrouter_client, "model": "minimax/minimax-m2.5:free"}
-        providers.insert(0, coding_provider)
-        if user_id:
-            try: bot.send_message(user_id, "👨‍💻 *Переключаюсь в режим кодинга (MiniMax M2.5)...*", parse_mode="Markdown")
-            except: pass
 
     for provider in providers:
         if not provider["client"].api_key:
@@ -312,8 +301,8 @@ def analyze_image_groq(base64_image, user_question="Опиши подробно,
     )
     return completion.choices[0].message.content
 
-def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma-4-31b-it:free"):
-    """Анализ изображения через OpenRouter (Gemma 4 31B Free для точного OCR)."""
+def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma-3-27b-it:free"):
+    """Анализ изображения через OpenRouter (Gemma 3 27B Free для точного OCR)."""
     messages = [
         {
             "role": "user",
@@ -537,9 +526,11 @@ def perform_web_search(query):
         print("❌ All search methods failed")
         return ""
     
-    context = "🔍 Результаты веб-поиска:\n"
+    context = "\n=== SEARCH DATA START ===\n"
+    context += f"🔍 Результаты веб-поиска для запроса: {search_query}\n"
     for i, r in enumerate(results, 1):
         context += f"{i}. {r['title']}: {r['body']}\n"
+    context += "=== SEARCH DATA END ===\n"
     return context
 
 # --- Погода (Open-Meteo, бесплатно, без ключа) ---
@@ -879,6 +870,7 @@ def send_welcome(message):
         "⭐ *Гороскоп* — /horoscope\n"
         "🌤️ *Погода* — /weather Москва или 'погода в Минске'\n"
         "🌐 *Поиск* — 'найди', 'курс доллара', 'новости'\n"
+        "👨‍💻 *Кодинг* — /programming <запрос>\n"
         "🧹 *Очистка* — /clear для сброса контекста"
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
@@ -1140,28 +1132,44 @@ def handle_photo(message):
         user_question = message.caption if message.caption else "Опиши подробно, что ты видишь на этом изображении."
         
         # ЛОГИКА ВЫБОРА МОДЕЛИ
-        ocr_keywords = ["текст", "рукописн", "почерк", "прочитай", "расшифруй", "написано", "что здесь"]
+        ocr_keywords = ["текст", "рукописн", "почерк", "прочитай", "расшифруй", "написано", "что здесь", "OCR"]
         is_ocr_task = any(k in user_question.lower() for k in ocr_keywords)
         
         description = ""
-        used_model = "Llama 4 Scout (Groq)"
+        used_model = ""
         
-        if is_ocr_task:
-            msg_status = bot.reply_to(message, "🔍 Анализирую почерк с помощью Gemma 4 31B...")
+        msg_status = bot.reply_to(message, "🔍 Изучаю изображение...")
+        
+        # Модели для попыток (OpenRouter)
+        vision_models = [
+            {"id": "google/gemma-3-27b-it:free", "name": "Gemma 3 27B"},
+            {"id": "google/gemma-4-31b-it:free", "name": "Gemma 4 31B"}
+        ]
+        
+        success = False
+        for model in vision_models:
             try:
-                description, real_model = analyze_image_openrouter(img_base64, user_question)
-                used_model = f"Gemma 4 31B (Paid: {real_model})"
-                bot.delete_message(user_id, msg_status.message_id)
+                bot.edit_message_text(f"🔍 Анализирую через {model['name']}...", user_id, msg_status.message_id)
+                description, real_model = analyze_image_openrouter(img_base64, user_question, model_id=model['id'])
+                used_model = f"{model['name']} (OR: {real_model})"
+                success = True
+                break
             except Exception as e:
-                error_msg = str(e)
-                print(f"OpenRouter Error: {error_msg}")
-                bot.edit_message_text(f"⚠️ Ошибка OpenRouter ({error_msg[:50]}...), использую резервную Llama...", user_id, msg_status.message_id)
+                print(f"⚠️ {model['name']} failed: {e}")
+                continue
+        
+        if not success:
+            # Резервный вариант: Groq (бесплатно, быстро, но может быть менее точным в OCR)
+            try:
+                bot.edit_message_text("🔄 Основные модели заняты, использую резервную Llama...", user_id, msg_status.message_id)
                 description = analyze_image_groq(img_base64, user_question)
-                used_model = "Llama 4 Scout (Groq - Fallback)"
-                time.sleep(2)
-                bot.delete_message(user_id, msg_status.message_id)
-        else:
-            description = analyze_image_groq(img_base64, user_question)
+                used_model = "Llama-Vision (Groq Fallback)"
+                success = True
+            except Exception as e:
+                bot.edit_message_text(f"❌ Ошибка распознавания: {e}", user_id, msg_status.message_id)
+                return
+
+        bot.delete_message(user_id, msg_status.message_id)
         
         # Сохраняем в память
         img_memory_text = f"[Пользователь прислал фото ({used_model})]: {user_question}"
@@ -1170,7 +1178,7 @@ def handle_photo(message):
         
         safe_send_message(user_id, f"🔍 (Модель: {used_model})\n\n{description}", reply_to_message_id=message.message_id)
     except Exception as e:
-        bot.send_message(user_id, f"❌ Ошибка при распознавании фото: {e}")
+        bot.send_message(user_id, f"❌ Критическая ошибка при обработке фото: {e}")
 
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
@@ -1393,6 +1401,49 @@ def handle_document(message):
     except Exception as e:
         print(f"Doc error: {e}")
         bot.edit_message_text(f"❌ Ошибка при чтении документа: {e}", chat_id=user_id, message_id=msg.message_id)
+
+@bot.message_handler(commands=['programming'])
+def handle_programming_command(message):
+    """
+    Специальный режим для кодинга. Использует MiniMax M2.5 (OpenRouter).
+    """
+    user_id = message.chat.id
+    query = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else ""
+    
+    if not query:
+        bot.reply_to(message, "👨‍💻 Укажи запрос для написания кода. Пример: `/programming напиши скрипт на python для парсинга цен`", parse_mode="Markdown")
+        return
+        
+    bot.send_message(user_id, "👨‍💻 *Вхожу в режим программирования (MiniMax M2.5)...*", parse_mode="Markdown")
+    bot.send_chat_action(user_id, 'typing')
+    
+    # Добавляем в память
+    add_message_to_memory(user_id, "user", f"[РЕЖИМ ПРОГРАММИРОВАНИЯ]: {query}")
+    
+    # Формируем запрос специально для MiniMax
+    system_code_prompt = (
+        "Ты — эксперт в программировании и написании кода. "
+        "Пиши чистый, оптимизированный и документированный код. "
+        "Используй Markdown для оформления кода. Отвечай на русском языке."
+    )
+    
+    messages = [
+        {"role": "system", "content": system_code_prompt},
+        {"role": "user", "content": query}
+    ]
+    
+    try:
+        # Для кодинга используем MiniMax напрямую через OpenRouter
+        completion = openrouter_client.chat.completions.create(
+            model="minimax/minimax-m2.5:free",
+            messages=messages,
+            temperature=0.3
+        )
+        response = completion.choices[0].message.content
+        safe_send_message(user_id, response)
+        add_message_to_memory(user_id, "assistant", response)
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка в режиме кодинга: {e}")
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
