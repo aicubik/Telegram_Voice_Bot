@@ -207,18 +207,19 @@ def ask_llm_smart(messages, user_id=None, tools=None):
     is_coding_task = any(t in query_text for t in code_triggers)
 
     providers = [
-        {"name": "Groq (Llama 4)", "client": groq_client, "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
-        {"name": "OpenRouter (Llama 3.3)", "client": openrouter_client, "model": "meta-llama/llama-3.3-70b-instruct:free"},
-        {"name": "OpenRouter (Gemma 4)", "client": openrouter_client, "model": "google/gemma-4-31b-it:free"}
+        {"name": "Groq (GPT-OSS 120b)", "client": groq_client, "model": "openai/gpt-oss-120b"},
+        {"name": "Groq (Llama 3.3)", "client": groq_client, "model": "llama-3.3-70b-versatile"},
+        {"name": "OpenRouter (Nemotron 3 Super)", "client": openrouter_client, "model": "nvidia/nemotron-3-super-120b-a12b:free"},
+        {"name": "OpenRouter (GLM 4.5 Air)", "client": openrouter_client, "model": "z-ai/glm-4.5-air:free"}
     ]
 
     # Qwen3 for coding tasks (no tools support for Qwen, it's a code specialist)
-    # Qwen3 for coding tasks
+    # Coding specialist models
     if is_coding_task:
-        qwen_provider = {"name": "Qwen3 Coder", "client": openrouter_client, "model": "qwen/qwen3-coder:free"}
-        providers.insert(0, qwen_provider)
+        coding_provider = {"name": "OR (MiniMax M2.5)", "client": openrouter_client, "model": "minimax/minimax-m2.5:free"}
+        providers.insert(0, coding_provider)
         if user_id:
-            try: bot.send_message(user_id, "👨‍💻 *Переключаюсь в режим кодинга (Qwen3 Coder)...*", parse_mode="Markdown")
+            try: bot.send_message(user_id, "👨‍💻 *Переключаюсь в режим кодинга (MiniMax M2.5)...*", parse_mode="Markdown")
             except: pass
 
     for provider in providers:
@@ -302,15 +303,15 @@ def analyze_image_groq(base64_image, user_question="Опиши подробно,
         }
     ]
     completion = groq_client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        model="llama-3.2-90b-vision-preview",
         messages=messages,
         temperature=0.5,
         max_tokens=1024,
     )
     return completion.choices[0].message.content
 
-def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma-4-31b-it"):
-    """Анализ изображения через OpenRouter (Gemma 4 31B - Paid для точного OCR)."""
+def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma-4-31b-it:free"):
+    """Анализ изображения через OpenRouter (Gemma 4 31B Free для точного OCR)."""
     messages = [
         {
             "role": "user",
@@ -1449,12 +1450,45 @@ def handle_text(message):
             
             # Prevent leaking system statuses to the user
             clean_text = final_text.strip()
-            if clean_text and not clean_text.startswith("✅") and not clean_text.startswith("[СИСТЕМА]"):
-                safe_send_message(user_id, clean_text)
-                add_message_to_memory(user_id, "assistant", clean_text)
-            elif clean_text.startswith("✅"):
-                 add_message_to_memory(user_id, "assistant", "✅ (Выполнено)")
-            break
+            
+            # Simple heuristic for JSON tool calls that leaked as content
+            extracted_tool = None
+            if clean_text.startswith("{") and clean_text.endswith("}"):
+                try:
+                    data = json.loads(clean_text)
+                    if "name" in data and "arguments" in data:
+                        extracted_tool = data["name"]
+                        extracted_args = data["arguments"]
+                    elif "location" in data or "city" in data:
+                        extracted_tool = "get_weather"
+                        extracted_args = data
+                    elif "remind_at" in data or "notification_id" in data:
+                        extracted_tool = "set_reminder"
+                        extracted_args = data
+                    elif "prompt" in data:
+                        extracted_tool = "generate_image"
+                        extracted_args = data
+                except json.JSONDecodeError:
+                    pass
+            
+            if extracted_tool:
+                class FakeFunction:
+                    name = extracted_tool
+                    arguments = json.dumps(extracted_args) if isinstance(extracted_args, dict) else str(extracted_args)
+                class FakeToolCall:
+                    id = f"call_{int(time.time())}"
+                    function = FakeFunction()
+                
+                llm_response.tool_calls = [FakeToolCall()]
+                llm_response.content = ""
+                # Do NOT break, process the tool call in the next block!
+            else:
+                if clean_text and not clean_text.startswith("✅") and not clean_text.startswith("[СИСТЕМА]"):
+                    safe_send_message(user_id, clean_text)
+                    add_message_to_memory(user_id, "assistant", clean_text)
+                elif clean_text.startswith("✅"):
+                     add_message_to_memory(user_id, "assistant", "✅ (Выполнено)")
+                break
         
         # 4. Обрабатываем tool_calls
         # Добавляем assistant message с tool_calls в контекст
