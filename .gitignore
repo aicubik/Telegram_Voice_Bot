@@ -15,3 +15,8 @@ env/
 # IDE
 .vscode/
 .idea/
+
+# Database
+*.db
+*.db-wal
+*.db-shm

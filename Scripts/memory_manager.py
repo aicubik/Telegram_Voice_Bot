@@ -32,7 +32,7 @@ DB_PATH = os.path.normpath(os.path.join(PROJECT_ROOT, "assistant_data.db"))
 
 def _get_db():
     """Get database connection with WAL mode for performance."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn

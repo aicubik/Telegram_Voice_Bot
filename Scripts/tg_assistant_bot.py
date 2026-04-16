@@ -12,6 +12,7 @@ import requests as http_requests
 from dotenv import load_dotenv
 from openai import OpenAI
 import re
+from types import SimpleNamespace
 from urllib.parse import quote
 from keep_alive import keep_alive
 import io
@@ -26,6 +27,7 @@ import xlrd
 # Agent modules
 from memory_manager import save_memory, search_memories, clear_user_memories
 from memory_manager import get_due_reminders, mark_reminder_sent
+from memory_manager import create_reminder, get_user_reminders, cancel_reminder as db_cancel_reminder
 from agent_tools import TOOLS, execute_tool, perform_web_search
 
 # 1. Загрузка конфигураций
@@ -95,6 +97,10 @@ SYSTEM_PROMPT = (
     "Рассчитай remind_at = текущий Unix timestamp + задержка в секундах. "
     "ЗАПРЕЩЕНО писать 'напоминание установлено' без вызова set_reminder! "
     "Если ты не вызвал set_reminder, напоминание НЕ будет работать!\n"
+    "\n=== HARD TRUTH SEARCH RULES ===\n"
+    "1. If tool output contains '=== SEARCH DATA START ===', you MUST treat all information between markers as absolute facts.\n"
+    "2. If search results contradict your internal training data, the search results WIN. No exceptions.\n"
+    "3. If search results are empty or not found, explicitly state: 'Информации не найдено'. DO NOT guess or hallucinate.\n"
     "\n⚠️ АБСОЛЮТНЫЙ ЗАПРЕТ: НИКОГДА не симулируй выполнение действия текстом. "
     "Если нужно установить напоминание — ВЫЗОВИ set_reminder. "
     "Если нужна погода — ВЫЗОВИ get_weather. "
@@ -168,6 +174,13 @@ def add_message_to_memory(user_id, role, content):
     memory.append({"role": role, "content": content})
     if len(memory) > MAX_HISTORY + 1:
         memory.pop(1)
+    
+    # Precent unbounded growth (ARCH-02) - keep max 1000 active users
+    if len(user_memory) > 1000:
+        # Dicts preserve insertion order in Python 3.7+ -> pop oldest 200
+        for k in list(user_memory.keys())[:200]:
+            if k != user_id:
+                user_memory.pop(k, None)
 
 # 3. Функции для работы с моделями
 
@@ -177,8 +190,6 @@ def generate_text_pollinations(messages):
         # Используем openai-совместимый эндпоинт Pollinations если доступен, 
         # или просто прямой POST запрос для максимальной легкости.
         url = "https://text.pollinations.ai/"
-        # Для Pollinations мы передаем последний запрос пользователя
-        last_query = messages[-1]["content"]
         payload = {
             "messages": messages,
             "model": "openai-fast" # Авто-выбор лучшей модели (напр. GPT-OSS)
@@ -190,7 +201,7 @@ def generate_text_pollinations(messages):
         print(f"⚠️ Pollinations Text failed: {e}")
     return None
 
-def ask_llm_smart(messages, user_id=None, tools=None):
+def ask_llm_smart(messages, tools=None):
     """
     Умная функция запроса к ИИ с автоматическим переключением провайдеров (Smart Fallback).
     Порядок 2026: Groq (Llama 4) -> OpenRouter (Llama 3.3 / Gemma 4) -> Pollinations.
@@ -246,19 +257,12 @@ def ask_llm_smart(messages, user_id=None, tools=None):
     final_res = generate_text_pollinations(messages)
     if final_res:
         if tools:
-            # Wrap in a fake message-like object for consistency
-            class FakeMsg:
-                content = final_res
-                tool_calls = None
-            return FakeMsg()
+            return SimpleNamespace(content=final_res, tool_calls=None)
         return final_res
     
     fallback_text = "⚠️ К сожалению, все магические каналы связи сейчас перегружены. Попробуй через минуту."
     if tools:
-        class FakeMsg:
-            content = fallback_text
-            tool_calls = None
-        return FakeMsg()
+        return SimpleNamespace(content=fallback_text, tool_calls=None)
     return fallback_text
 
 
@@ -276,7 +280,7 @@ def analyze_image_groq(base64_image, user_question="Опиши подробно,
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": f"Отвечай на русском языке. {user_question}"},
+                {"type": "text", "text": "OCR TASK: Provide ONLY the text found in this image. No meta-talk, no 'Here is the text'. If no text found, say 'NO_TEXT_FOUND'. User query for context: " + user_question},
                 {
                     "type": "image_url",
                     "image_url": {
@@ -292,17 +296,16 @@ def analyze_image_groq(base64_image, user_question="Опиши подробно,
         temperature=0.5,
         max_tokens=1024,
     )
+    if not completion.choices:
+        return "Ошибка: модель не вернула результат."
     return completion.choices[0].message.content
 
-def is_search_needed(query):
-    """Определить, нужен ли поиск."""
-    q = query.lower()
-    has_time = any(t in q for t in ["сейчас", "сегодня", "завтра", "актуаль", "курс", "цена"])
-    info_topics = ["кино", "сеанс", "билет", "новости", "события", "курс", "доллар", "евро", "бензин"]
-    has_topic = any(t in q for t in info_topics)
-    return has_time and has_topic
+# --- Инициализация и настройки ---
 
-DEFAULT_REGION = "Беларусь"
+def get_current_time_str():
+    """Текущее время в формате Минска (UTC+3) для контекста LLM."""
+    tz_minsk = datetime.timezone(datetime.timedelta(hours=3))
+    return datetime.datetime.now(tz=tz_minsk).strftime('%Y-%m-%d %H:%M')
 
 def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma-3-27b-it:free"):
     """Анализ изображения через OpenRouter (Gemma 3 27B Free для точного OCR)."""
@@ -310,7 +313,7 @@ def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": f"Ты — самый точный в мире эксперт по распознаванию рукописного текста (OCR). Пожалуйста, максимально точно перепиши текст с изображения, сохраняя структуру. Используй русский язык. ОЧЕНЬ ВАЖНО: не фантазируй, пиши только то, что видишь. {user_question}"},
+                {"type": "text", "text": "OCR TASK: Provide ONLY the text found in this image. No meta-talk, no 'Here is the text'. If no text found, say 'NO_TEXT_FOUND'. User query for context: " + user_question},
                 {
                     "type": "image_url",
                     "image_url": {
@@ -331,6 +334,8 @@ def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma
         }
     )
     # Возвращаем текст и РЕАЛЬНОЕ имя модели, которое выбрал роутер
+    if not completion.choices:
+        return "Ошибка: модель не вернула результат.", "unknown"
     return completion.choices[0].message.content, completion.model
 
 def translate_prompt_for_image(user_prompt):
@@ -351,66 +356,9 @@ def translate_prompt_for_image(user_prompt):
         # Если перевод не удался — используем оригинал
         return user_prompt
 
-# --- Веб-поиск (DuckDuckGo, бесплатно, без ключа) ---
+# --- Веб-поиск (используется унифицированный perform_web_search из agent_tools) ---
 
-DEFAULT_REGION = "Беларусь"
 
-def needs_web_search(query):
-    """Определяет, нужен ли веб-поиск для ответа на вопрос."""
-    q = query.lower()
-    
-    # Слишком короткий текст — не ищем
-    if len(q.split()) < 3:
-        return False
-    
-    # Категория 1: Прямой запрос на поиск
-    if any(t in q for t in ["найди", "загугли", "поищи", "search", "гугл"]):
-        return True
-    
-    # Категория 3: Кто/что это
-    if any(t in q for t in ["кто такой", "кто такая", "что такое", "что за",
-                             "расскажи про", "информация о", "что известно"]):
-        return True
-    
-    # Категория 4: Фактчекинг
-    if any(t in q for t in ["правда ли", "правда что", "это правда", "проверь"]):
-        return True
-    
-    # Категория 5: Цены/продукты
-    if any(t in q for t in ["сколько стоит", "цена на", "где купить", "обзор"]):
-        return True
-    
-    # Категория 2: Время + тема (нужны ОБА)
-    time_markers = ["сегодня", "вчера", "сейчас", "2025", "2026",
-                    "последни", "свежи", "актуальн", "на данный момент"]
-    info_topics = ["курс", "цена", "новост", "результат", "счёт",
-                   "матч", "выбор", "закон", "событи", "произошл"]
-    
-    has_time = any(t in q for t in time_markers)
-    has_topic = any(t in q for t in info_topics)
-    if has_time and has_topic:
-        return True
-    
-    return False
-
-def localize_search_query(query):
-    """Добавить региональный контекст (Беларусь) к поисковому запросу если нужно."""
-    q_lower = query.lower()
-    
-    # Если регион уже указан — не трогаем
-    regions = ["беларус", "росси", "украин", "казахстан", "польш",
-               "сша", "usa", "europe", "европ", "мир", "минск", "москв",
-               "киев", "варшав", "лондон", "берлин", "париж"]
-    if any(r in q_lower for r in regions):
-        return query
-    
-    # Темы, требующие региональной привязки
-    regional_topics = [
-        "курс", "валют", "доллар", "евро", "рубл",
-        "цена", "стоимость", "стоит", "бензин", "топлив",
-        "новост", "событи", "произошл",
-        "закон", "указ", "постановлен", "выбор",
-DEFAULT_REGION = "Беларусь"
 
 # --- Погода (Open-Meteo, бесплатно, без ключа) ---
 
@@ -540,7 +488,6 @@ def get_weather(city_name, country_hint=None, forecast_days=1):
         )
     else:
         # Многодневный прогноз
-        from datetime import datetime
         text = f"🌤️ *Погода: {display_name}* ({country})\n\n"
         text += f"📍 Сейчас: *{cur['temperature_2m']}°C* (ощущается {cur['apparent_temperature']}°C)\n"
         text += f"{weather_desc}  |  💧 {cur['relative_humidity_2m']}%  |  💨 {cur['wind_speed_10m']} км/ч\n"
@@ -549,10 +496,10 @@ def get_weather(city_name, country_hint=None, forecast_days=1):
         for i in range(forecast_days):
             date_str = day["time"][i]  # "2026-04-15"
             try:
-                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
                 day_name = DAY_NAMES[dt.weekday()]
                 date_label = f"{day_name} {dt.day:02d}.{dt.month:02d}"
-            except:
+            except Exception:
                 date_label = date_str
             
             day_weather = WEATHER_CODES.get(day.get("weather_code", [0]*7)[i], "")
@@ -598,7 +545,6 @@ def _parse_city_country(raw):
 
 def extract_city_from_text(text):
     """Извлечь название города и страну из текста. Возвращает (city, country_hint) или (None, None)."""
-    import re
     text_clean = text.lower().strip().rstrip('?.!')
     
     patterns = [
@@ -740,7 +686,7 @@ def _generate_and_send_image(user_id, prompt, message, force_premium=False):
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     welcome_text = (
-        "👋 Привет! Я твой лично ИИ-помощник.\n\n"
+        "👋 Привет! Я твой личный ИИ-помощник.\n\n"
         "💬 *Текст* — задай любой вопрос\n"
         "🎤 *Голос* — отправь голосовое сообщение\n"
         "📷 *Фото* — отправь картинку, я опишу что на ней\n"
@@ -834,7 +780,7 @@ def handle_tarot_command(message):
         try:
             card_prompt = f"Mystical tarot card '{card['en']}', Major Arcana, occult style, detailed illustration, {'reversed' if is_reversed else ''}"
             image_bytes = generate_image_pollinations_auth(card_prompt, "flux")
-        except: pass
+        except Exception: pass
 
         interpretation_messages = [
             {"role": "system", "content": MYSTIC_PROMPT},
@@ -928,7 +874,6 @@ def handle_remind_command(message):
         bot.reply_to(message, "⚠️ Максимальное время — 30 дней.")
         return
     
-    from memory_manager import create_reminder
     remind_at = time.time() + seconds
     reminder_id = create_reminder(user_id, reminder_text, remind_at)
     
@@ -955,7 +900,6 @@ def handle_remind_command(message):
 def handle_reminders_command(message):
     """Show all active reminders"""
     user_id = message.chat.id
-    from memory_manager import get_user_reminders
     reminders = get_user_reminders(user_id, status="pending")
     
     if not reminders:
@@ -991,9 +935,8 @@ def handle_cancel_reminder_command(message):
         return
     
     reminder_id = int(raw_text.strip())
-    from memory_manager import cancel_reminder as db_cancel
     
-    if db_cancel(reminder_id, user_id):
+    if db_cancel_reminder(reminder_id, user_id):
         bot.reply_to(message, f"✅ Напоминание #{reminder_id} отменено.")
     else:
         bot.reply_to(message, f"⚠️ Напоминание #{reminder_id} не найдено или уже выполнено.")
@@ -1151,8 +1094,10 @@ def _bpt_traverse(node, depth=0):
                     text += _bpt_traverse(pv, depth)
                     
     elif isinstance(node, (list, tuple)):
-        vs = list(node.values()) if hasattr(node, 'values') else node
-        for item in vs:
+        for item in node:
+            text += _bpt_traverse(item, depth)
+    elif hasattr(node, 'values'):
+        for item in node.values():
             text += _bpt_traverse(item, depth)
             
     return text
@@ -1270,7 +1215,7 @@ def handle_document(message):
             bot.edit_message_text(f"✅ Документ прочитан! Обрабатываю твой запрос: *{message.caption[:50]}...*", chat_id=user_id, message_id=msg.message_id, parse_mode="Markdown")
             
             bot.send_chat_action(user_id, 'typing')
-            response = ask_llm_smart(get_memory(user_id), user_id=user_id)
+            response = ask_llm_smart(get_memory(user_id))
             
             safe_send_message(user_id, response)
             add_message_to_memory(user_id, "assistant", response)
@@ -1373,7 +1318,7 @@ def handle_text(message):
     for iteration in range(max_iterations):
         print(f"🤖 Agent Loop iteration {iteration + 1}/{max_iterations}")
         
-        llm_response = ask_llm_smart(messages_for_llm, user_id=user_id, tools=TOOLS)
+        llm_response = ask_llm_smart(messages_for_llm, tools=TOOLS)
         
         # Проверяем, есть ли tool_calls
         if not hasattr(llm_response, 'tool_calls') or not llm_response.tool_calls:
@@ -1392,21 +1337,21 @@ def handle_text(message):
             extracted_args = {}
             
             # Parse JSON anywhere in text to handle models that wrap JSON in markdown or plain text
-            json_match = re.search(r'\{[\s\S]*\}', clean_text)
+            json_match = re.search(r'\{[\s\S]*?\}', clean_text)
             if json_match:
                 try:
                     data = json.loads(json_match.group(0))
-                    if "name" in data and "arguments" in data:
+                    known_tools = {"search_web", "read_webpage", "generate_image", "get_weather",
+                                   "remember_fact", "recall_memories", "draw_tarot_card",
+                                   "get_horoscope", "set_reminder", "list_reminders", "cancel_reminder"}
+                    if "name" in data and "arguments" in data and data["name"] in known_tools:
                         extracted_tool = data["name"]
                         extracted_args = data["arguments"]
                     elif "location" in data or "city" in data:
                         extracted_tool = "get_weather"
                         extracted_args = data
-                    elif "remind_at" in data or "notification_id" in data:
+                    elif "remind_at" in data:
                         extracted_tool = "set_reminder"
-                        extracted_args = data
-                    elif "prompt" in data:
-                        extracted_tool = "generate_image"
                         extracted_args = data
                 except json.JSONDecodeError:
                     pass
@@ -1469,7 +1414,7 @@ def handle_text(message):
             elif tool_result.startswith("__WEATHER__|"):
                 parts = tool_result.split("|")
                 city = parts[1] if len(parts) > 1 else ""
-                country = parts[2] if len(parts) > 2 else None
+                country = parts[2].strip() if len(parts) > 2 else None
                 forecast_days = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
                 try:
                     weather_text, display_name = get_weather(city, country if country else None, forecast_days=forecast_days)
@@ -1499,7 +1444,7 @@ def handle_text(message):
                 
                 try:
                     bot.delete_message(user_id, status_msg.message_id)
-                except: pass
+                except Exception: pass
                 
                 tool_result = f"[СИСТЕМА] Выпала карта: {card['name']} ({card['en']}) {position}. Изображение карты УЖЕ отправлено. Напиши для неё красивую мистическую интерпретацию. ПИШИ ТОЛЬКО ТЕКСТ ИНТЕРПРЕТАЦИИ, без технических тегов типа <output>."
             

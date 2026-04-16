@@ -14,6 +14,7 @@ import json
 import random
 import time
 import re
+import datetime
 import requests as http_requests
 from memory_manager import (
     save_memory, search_memories, jina_search, jina_read_url,
@@ -552,7 +553,6 @@ def _exec_list_reminders(args: dict, ctx: dict) -> str:
     if not reminders:
         return "У тебя нет активных напоминаний."
     
-    import datetime
     tz = datetime.timezone(datetime.timedelta(hours=3))  # Minsk UTC+3
     
     result = f"Активные напоминания ({len(reminders)}):\n"
