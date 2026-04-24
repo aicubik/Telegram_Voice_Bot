@@ -352,8 +352,8 @@ def translate_prompt_for_image(user_prompt):
     messages = [
         {"role": "system", "content": (
             "You are a translator. Translate the user's image generation prompt to English. "
-            "If no specific style is mentioned, add 'photorealistic, high quality, detailed' to the prompt. "
-            "If a specific style IS mentioned (e.g. 'в стиле аниме', 'масляная живопись'), keep that style. "
+            "If no specific artistic style is mentioned, add 'realistic cinematic style, 8k resolution, highly detailed' to the prompt. "
+            "If a specific style IS mentioned (e.g. 'в стиле аниме', 'нарисуй', 'иллюстрация', 'арт'), keep that style and DO NOT add the cinematic/realistic tags. "
             "Output ONLY the translated prompt, nothing else. No explanations."
         )},
         {"role": "user", "content": user_prompt}
