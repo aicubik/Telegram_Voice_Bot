@@ -1,46 +1,89 @@
-# Telegram AI Vision Assistant — Handover Document
+# Telegram AI Assistant -- Agent Handover Document (2026-04)
 
-Этот файл создан для быстрого погружения нового ИИ-агента в контекст проекта **Telegram AI Vision Assistant**. 
-**Агент, читающий этот файл: ознакомься с нижеописанной архитектурой и текущим статусом проекта перед тем, как предлагать изменения.**
+Agent, read this document BEFORE making any changes to the project.
+It describes the current architecture, stack, and conventions.
 
-## 📌 Суть проекта
-Многофункциональный Telegram-бот, который выступает в роли умного "визуального" и "голосового" ассистента. Бот умеет транскрибировать голосовые сообщения, описывать фото, извлекать текст с изображений (OCR), искать в интернете и генерировать картинки.
+## Project Summary
+Multi-modal Telegram bot: voice transcription, photo analysis, OCR, web search,
+image generation, long-term memory, and scheduled reminders.
 
-## 🏗 Текущая архитектура и Стек технологий
-- **Фреймворк:** `pyTelegramBotAPI`
-- **Маршрутизация LLM (Hybrid Vision):**
-  - **Llama 4 Scout 17B (через Groq):** Используется как основная модель (llm) и для быстрого анализа/описания обычных фото. Быстрая и бесплатная.
-  - **Gemma 4 31B (Paid, через OpenRouter):** Интеллектуальный "тяжеловес" для сложных задач OCR (распознавание рукописного текста, таблиц). Бот автоматически определяет потребность в OCR по триггерным словам (текст, прочитай, почерк и т.д.) и перенаправляет запрос на Gemma 31B.
-- **Генерация изображений (AI Art):**
-  - **Pollinations.ai:** Генерация (мгновенная и бесплатная).
-  - **Pixazo AI:** Генерация с использованием модели Flux-1-schnell (Unified Gateway).
-- **Поиск в сети:** Сервис Serper (Google Search API).
-- **Распознавание речи:** OpenAI Whisper (Whisper-large-v3-turbo).
-- **Память:** Встроенная память сессии, бот помнит историю диалога для каждого `user_id`.
+## Architecture (4 Core Modules)
 
-## 🛡 Безопасность и Конфигурация (ОЧЕНЬ ВАЖНО)
-- Был произведен "Ядерный сброс" (Nuclear Reset) Git-истории. Папка `.git` была пересоздана, чтобы убрать все утечки API-ключей в коммитах.
-- **АБСОЛЮТНО ВСЕ КЛЮЧИ** (Telegram, Groq, OpenRouter, Pollinations, Serper, Pixazo) хранятся **ТОЛЬКО** в файле `Credentials.env` и загружаются через `.env`.
-- Никаких захардкоженных токенов! `Credentials.env` добавлен в `.gitignore`.
+| File | Role |
+|---|---|
+| `Scripts/tg_assistant_bot.py` | Main bot: handlers, LLM routing, agent loop, image gen cascade |
+| `Scripts/agent_tools.py` | Function-calling tools (11 tools: web_search, generate_image, save_memory, etc.) |
+| `Scripts/memory_manager.py` | Short-term (dict) + Long-term (SQLite + Jina embeddings) memory |
+| `Scripts/leonardo_client.py` | Leonardo AI client with multi-key rotation (Nano Banana 2) |
+| `Scripts/keep_alive.py` | Flask keep-alive for Render free tier |
 
-## 📁 Структура директорий
-- `Scripts/tg_assistant_bot.py` — Главный файл бота. Вся логика роутинга и хэндлеров здесь.
-- `Scripts/keep_alive.py` — Flask-сервер для поддержания активности на бесплатных хостингах.
-- `scratch/testing/` — Скрипты тестирования различных провайдеров и моделей.
-- `requirements.txt` — Список зависимостей (актуализирован, содержит `Pillow`, `gTTS` и пр.).
-- `README.md` — Подробная документация с описанием гибридного движка.
-- `GEMINI.md` — Ультимативный мастер-конфиг (Antigravity DO/WAT Framework). Содержит: матрицу маршрутизации (OpenRouter 2026 SOTA), архитектуру разделения на Оркестратора и Скрипты (WAT), а также строгий модуль самообучения (The Self-Improvement Loop). Это Библия для нового агента.
+## LLM Provider Stack (Priority Order)
 
-## ✅ Последние изменения (на апрель 2026)
-1. Настроен умный роутинг (Fallback-цепочка): если OpenRouter падает, обработка переходит к Groq, а затем к Pollinations Text Generation.
-2. Добавлено отображение реальной использованной модели в ответах бота: `🔍 (Модель: Gemma 4 31B (Paid: ...))`.
-3. Файл `requirements.txt` полностью очищен и обновлен для деплоя.
-4. Добавлена интеграция Pixazo AI как Pro-вариант создания картинок.
+| Priority | Provider | Model | Use Case |
+|---|---|---|---|
+| 1 | Groq (LPU) | Llama 4 Scout 17B | Primary chat, function calling |
+| 2 | OpenRouter | Gemma 4 31B (paid) | Heavy OCR, complex vision |
+| 3 | Groq Fallback | Llama 3.3 70B | When Scout unavailable |
+| 4 | OpenRouter Free | Various free models | Ultimate fallback |
 
-## 🚀 Как начать работу
-Новый агент должен:
-1. Прочитать `Scripts/tg_assistant_bot.py` (хотя бы функции-хэндлеры и логику вызова API).
-2. Ознакомиться с `Credentials.env`, чтобы понимать, какие API-ключи доступны.
-3. **ОБЯЗАТЕЛЬНО ПРОЧИТАТЬ `GEMINI.md` ОТ НАЧАЛА ДО КОНЦА.** Понять концепцию DO/WAT Framework (ты принимаешь решения, скрипты делают работу).
-4. Усвоить «Self-Improvement Loop»: если ты фиксишь баг в скрипте, ты обязан обновить SOP-инструкцию, чтобы бага не было в будущем.
-5. Продолжить разработку фич или исправление багов по запросу пользователя.
+## Image Generation Cascade (Priority Order)
+
+| Priority | Provider | Model | Cost | Notes |
+|---|---|---|---|---|
+| 1 | **Leonardo AI** | Nano Banana 2 | $0.04/img | 16:9 (1376x768), key rotation |
+| 2 | Pollinations | zimage | Free | Authenticated |
+| 3 | Pollinations | flux | Free | Authenticated |
+| 4 | Pixazo | Flux-1-schnell | Free tier | Unified Gateway |
+| 5 | Together AI | Flux-1-schnell | Free tier | Final fallback |
+
+### Leonardo Key Rotation
+- Keys stored in `Credentials.env` as `LEONARDO_API_KEYS: key1,key2,key3`
+- `LeonardoKeyPool` rotates through keys automatically
+- On HTTP 402 (insufficient funds): key marked exhausted, next key tried
+- Pool status: `leonardo.get_status()` returns `{total, active, exhausted}`
+
+## Agent Loop (Function Calling)
+- Max 3 iterations per user message
+- 11 tools defined in `agent_tools.py` (TOOLS list)
+- JSON function calls extracted from LLM response, executed, results fed back
+- Anti-loop protection: same tool+args detected -> break
+
+## Memory System
+- **Short-term:** `conversation_history[user_id]` dict, max ~50 messages
+- **Long-term:** SQLite via `memory_manager.py`
+  - `save_memory(user_id, content)` -- stores with Jina embedding
+  - `search_memories(user_id, query)` -- semantic search
+  - `create_reminder(user_id, text, time)` -- scheduled reminders
+  - Background thread polls `get_due_reminders()` every 60s
+
+## Security
+- ALL keys in `Credentials.env` (gitignored)
+- `<think>` blocks stripped from LLM output
+- JSON leak filter: raw JSON tool calls hidden from user
+- Git history was nuclear-reset (no key leaks in commits)
+
+## Deployment
+- Platform: Render (free tier)
+- `keep_alive.py` runs Flask on port 10000
+- Entry: `python Scripts/tg_assistant_bot.py`
+- Env vars set in Render dashboard
+
+## Key Environment Variables
+```
+TELEGRAM_BOT_TOKEN
+GROQ_API_KEY
+OPENROUTER_API_KEY
+POLLINATIONS_API_KEY
+PIXAZO_API_KEY
+TOGETHER_API_KEY
+LEONARDO_API_KEYS          # comma-separated: key1,key2,key3
+SERPER_API_KEY
+JINA_API_KEY
+HUGGINGFACE_TOKEN
+```
+
+## How to Start
+1. Read `tg_assistant_bot.py` (handlers + LLM routing + image cascade)
+2. Read `Credentials.env` to understand available API keys
+3. Read `GEMINI.md` for DO/WAT Framework philosophy
+4. Follow Self-Improvement Loop: fix bug -> update SOP -> prevent recurrence

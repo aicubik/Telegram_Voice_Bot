@@ -29,6 +29,7 @@ from memory_manager import save_memory, search_memories, clear_user_memories
 from memory_manager import get_due_reminders, mark_reminder_sent
 from memory_manager import create_reminder, get_user_reminders, cancel_reminder as db_cancel_reminder
 from agent_tools import TOOLS, execute_tool, perform_web_search
+from leonardo_client import LeonardoClient
 
 # 1. Загрузка конфигураций
 load_dotenv('../Credentials.env')
@@ -41,6 +42,14 @@ HF_TOKEN = os.getenv('HUGGINGFACE_TOKEN')
 POLLINATIONS_KEY = os.getenv('POLLINATIONS_API_KEY')
 PIXAZO_KEY = os.getenv('PIXAZO_API_KEY')
 TOGETHER_KEY = os.getenv('TOGETHER_API_KEY')
+
+# Leonardo AI (Nano Banana 2) — multiple keys for rotation
+_leonardo_keys = [k.strip() for k in os.getenv('LEONARDO_API_KEYS', '').split(',') if k.strip()]
+leonardo = LeonardoClient(_leonardo_keys) if _leonardo_keys else None
+if leonardo:
+    print(f"🎨 Leonardo AI initialized with {leonardo.pool.total_keys} key(s)")
+else:
+    print("⚠️ Leonardo AI: No API keys configured (LEONARDO_API_KEYS)")
 
 # Инициализация клиентов
 bot = telebot.TeleBot(TELEGRAM_TOKEN or "dummy_token")
@@ -560,6 +569,15 @@ def extract_city_from_text(text):
 
 # --- Генерация изображений ---
 
+def generate_image_leonardo(prompt_en):
+    """Генерация через Leonardo AI (Nano Banana 2) с ротацией ключей."""
+    if not leonardo:
+        raise Exception("Leonardo API keys not configured (LEONARDO_API_KEYS)")
+    result = leonardo.generate_image(prompt_en)
+    if not result:
+        raise Exception("Leonardo generation failed or all keys exhausted")
+    return result
+
 def generate_image_legacy(prompt_en):
     """Генерация изображения через Pollinations.ai (бесплатно, без ключа)."""
     encoded_prompt = quote(prompt_en)
@@ -646,6 +664,7 @@ def _generate_and_send_image(user_id, prompt, message, force_premium=False):
         used_engine = ""
         
         generators = [
+            {"name": "Leonardo (Nano Banana 2)", "func": generate_image_leonardo},
             {"name": "Pollinations (zimage)", "func": lambda p: generate_image_pollinations_auth(p, "zimage")},
             {"name": "Pollinations (flux)", "func": lambda p: generate_image_pollinations_auth(p, "flux")},
             {"name": "Pixazo (Flux)", "func": generate_image_pixazo},
