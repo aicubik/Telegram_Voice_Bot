@@ -110,13 +110,59 @@ class LeonardoClient:
             "content-type": "application/json",
         }
 
+    def _upload_init_image(self, api_key: str, image_bytes: bytes, extension: str = "jpg") -> str | None:
+        """
+        Step 1: POST to v1/init-image -> get S3 fields -> upload to S3.
+        Returns initImageId on success.
+        """
+        url_v1 = "https://cloud.leonardo.ai/api/rest/v1/init-image"
+        payload = {"extension": extension}
+        
+        try:
+            resp = http_requests.post(
+                url_v1, 
+                headers=self._headers(api_key), 
+                json=payload,
+                timeout=self.REQUEST_TIMEOUT
+            )
+            if resp.status_code != 200:
+                print(f"[ERR] Leonardo init-image failed: {resp.status_code}")
+                return None
+            
+            data = resp.json().get("uploadInitImage", {})
+            init_image_id = data.get("id")
+            fields_raw = data.get("fields")
+            upload_url = data.get("url")
+            
+            if not init_image_id or not upload_url:
+                return None
+            
+            # Parse fields if it's a string
+            fields = fields_raw
+            if isinstance(fields_raw, str):
+                import json
+                fields = json.loads(fields_raw)
+            
+            # 2. Upload to S3
+            files = {"file": image_bytes}
+            upload_resp = http_requests.post(upload_url, data=fields, files=files, timeout=60)
+            
+            if upload_resp.status_code in (200, 204):
+                print(f"[OK] Leonardo reference image uploaded: {init_image_id}")
+                return init_image_id
+            else:
+                print(f"[ERR] S3 upload failed: {upload_resp.status_code}")
+        except Exception as e:
+            print(f"[ERR] Leonardo upload exception: {e}")
+            
+        return None
+
     def _submit_generation(self, api_key: str, prompt: str,
-                           width: int, height: int) -> str | None:
+                           width: int, height: int,
+                           init_image_id: str | None = None) -> str | None:
         """
         Step 1: POST to v2/generations -> returns generationId.
-
-        Returns generationId on success, None on failure.
-        Raises ValueError on 402 (insufficient funds).
+        Supports optional Character Reference (preprocessorId 133).
         """
         payload = {
             "model": self.DEFAULT_MODEL,
@@ -129,6 +175,17 @@ class LeonardoClient:
             },
             "public": False,
         }
+
+        # Add Character Reference if image provided
+        if init_image_id:
+            payload["parameters"]["controlnets"] = [
+                {
+                    "initImageId": init_image_id,
+                    "initImageType": "UPLOADED",
+                    "preprocessorId": 133,  # Character Reference (Magic for face consistency)
+                    "strengthType": "High"  # High resemblance
+                }
+            ]
 
         resp = http_requests.post(
             self.BASE_URL_V2,
@@ -145,11 +202,8 @@ class LeonardoClient:
             return None
 
         data = resp.json()
-
-        # v2 API response format
         gen_id = None
 
-        # Try known response structures (ordered by likelihood)
         if "generate" in data:
             gen_id = data["generate"].get("generationId")
         elif "sdGenerationJob" in data:
@@ -169,8 +223,6 @@ class LeonardoClient:
     def _poll_generation(self, api_key: str, generation_id: str) -> str | None:
         """
         Step 2: Poll GET /v1/generations/{id} until status is COMPLETE.
-
-        Returns the URL of the first generated image, or None on timeout/error.
         """
         url = f"{self.BASE_URL_V1}/{generation_id}"
         start_time = time.time()
@@ -189,8 +241,6 @@ class LeonardoClient:
                     continue
 
                 data = resp.json()
-
-                # Navigate to generation data
                 gen_data = data
                 if "generations_by_pk" in data:
                     gen_data = data["generations_by_pk"]
@@ -224,75 +274,65 @@ class LeonardoClient:
         return None
 
     def _download_image(self, image_url: str) -> bytes | None:
-        """Step 3: Download the generated image from CDN URL."""
+        """Step 3: Download image from CDN."""
         try:
             resp = http_requests.get(image_url, timeout=60)
             if resp.status_code == 200 and len(resp.content) > 1000:
-                print(f"[OK] Leonardo image downloaded: {len(resp.content)} bytes")
                 return resp.content
-            print(f"[WARN] Leonardo download failed: {resp.status_code}, "
-                  f"size={len(resp.content)}")
         except Exception as e:
             print(f"[ERR] Leonardo download error: {e}")
         return None
 
     def generate_image(self, prompt: str,
                        width: int | None = None,
-                       height: int | None = None) -> bytes | None:
+                       height: int | None = None,
+                       reference_image: bytes | None = None) -> bytes | None:
         """
         Full pipeline: submit -> poll -> download.
-        Automatically rotates keys on 402 (insufficient funds).
-
-        Args:
-            prompt: English text prompt for image generation.
-            width: Image width (default: 1376 for 16:9).
-            height: Image height (default: 768 for 16:9).
-
-        Returns:
-            Image bytes on success, None if all keys exhausted or error.
+        Supports optional reference image (Character Reference).
         """
         w = width or self.DEFAULT_WIDTH
         h = height or self.DEFAULT_HEIGHT
 
-        # Try each available key
         attempts = 0
         max_attempts = self._pool.total_keys
 
         while attempts < max_attempts:
             api_key = self._pool.get_active_key()
             if not api_key:
-                print("[ERR] Leonardo: All API keys exhausted!")
                 return None
 
             attempts += 1
-
             try:
-                # Step 1: Submit generation
-                gen_id = self._submit_generation(api_key, prompt, w, h)
+                # Optional: Upload reference image
+                init_image_id = None
+                if reference_image:
+                    init_image_id = self._upload_init_image(api_key, reference_image)
+                    if not init_image_id:
+                        print("[WARN] Leonardo: Failed to upload reference, proceeding without it.")
+
+                # Step 1: Submit
+                gen_id = self._submit_generation(api_key, prompt, w, h, init_image_id)
                 if not gen_id:
                     continue
 
-                # Step 2: Poll for completion
+                # Step 2: Poll
                 image_url = self._poll_generation(api_key, gen_id)
                 if not image_url:
                     continue
 
-                # Step 3: Download image
-                image_bytes = self._download_image(image_url)
-                if image_bytes:
-                    return image_bytes
+                # Step 3: Download
+                return self._download_image(image_url)
 
             except ValueError as e:
                 if "INSUFFICIENT_FUNDS" in str(e):
                     self._pool.mark_exhausted(api_key)
-                    continue  # Try next key
+                    continue
                 raise
-
             except Exception as e:
                 print(f"[ERR] Leonardo unexpected error: {e}")
                 return None
 
-        print("[ERR] Leonardo: All attempts failed")
         return None
 
     def get_status(self) -> dict:

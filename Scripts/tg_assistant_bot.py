@@ -347,12 +347,17 @@ def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma
         return "Ошибка: модель не вернула результат.", "unknown"
     return completion.choices[0].message.content, completion.model
 
-def translate_prompt_for_image(user_prompt):
+def translate_prompt_for_image(user_prompt, is_reference=False):
     """Скрытый перевод промпта пользователя на английский для генерации картинки."""
+    style_suffix = "realistic cinematic style, 8k resolution, highly detailed"
+    if is_reference:
+        # For character reference, we want more specific focus on the scene
+        style_suffix = "photorealistic, cinematic lighting, 8k, highly detailed"
+
     messages = [
         {"role": "system", "content": (
             "You are a translator. Translate the user's image generation prompt to English. "
-            "If no specific artistic style is mentioned, add 'realistic cinematic style, 8k resolution, highly detailed' to the prompt. "
+            f"If no specific artistic style is mentioned, add '{style_suffix}' to the prompt. "
             "If a specific style IS mentioned (e.g. 'в стиле аниме', 'нарисуй', 'иллюстрация', 'арт'), keep that style and DO NOT add the cinematic/realistic tags. "
             "Output ONLY the translated prompt, nothing else. No explanations."
         )},
@@ -362,7 +367,6 @@ def translate_prompt_for_image(user_prompt):
         result = ask_llm_smart(messages)
         return result.strip()
     except Exception:
-        # Если перевод не удался — используем оригинал
         return user_prompt
 
 # --- Веб-поиск (используется унифицированный perform_web_search из agent_tools) ---
@@ -569,11 +573,11 @@ def extract_city_from_text(text):
 
 # --- Генерация изображений ---
 
-def generate_image_leonardo(prompt_en):
-    """Генерация через Leonardo AI (Nano Banana 2) с ротацией ключей."""
+def generate_image_leonardo(prompt_en, reference_image=None):
+    """Генерация через Leonardo AI (Nano Banana 2) с ротацией ключей. Поддерживает референс."""
     if not leonardo:
         raise Exception("Leonardo API keys not configured (LEONARDO_API_KEYS)")
-    result = leonardo.generate_image(prompt_en)
+    result = leonardo.generate_image(prompt_en, reference_image=reference_image)
     if not result:
         raise Exception("Leonardo generation failed or all keys exhausted")
     return result
@@ -653,23 +657,46 @@ def generate_image_together(prompt_en):
             return base64.b64decode(data["data"][0]["b64_json"])
     raise Exception(f"Together AI failed: {response.status_code}")
 
-def _generate_and_send_image(user_id, prompt, message, force_premium=False):
-    """Умная генерация с фоллбэком."""
+def _generate_and_send_image(user_id, prompt, message, force_premium=False, reference_image=None):
+    """Умная генерация с фоллбэком. Поддерживает Character Reference для Leonardo."""
     bot.send_chat_action(user_id, 'upload_photo')
-    status_msg = bot.reply_to(message, "🎨 Начинаю работу над шедевром, подождите...")
+    
+    # Автоматический поиск референса в "ответе" (Reply To Message)
+    if not reference_image and message.reply_to_message:
+        target = message.reply_to_message
+        photo_to_download = None
+        if target.photo:
+            photo_to_download = target.photo[-1].file_id
+        elif target.document and target.document.mime_type.startswith('image/'):
+            photo_to_download = target.document.file_id
+            
+        if photo_to_download:
+            try:
+                print(f"🧬 Found reference image in reply to message {target.message_id}")
+                file_info = bot.get_file(photo_to_download)
+                reference_image = bot.download_file(file_info.file_path)
+            except Exception as e:
+                print(f"⚠️ Failed to download reply photo: {e}")
+
+    status_msg = bot.reply_to(message, "🎨 Начинаю работу над шедевром, подождите..." if not reference_image else "🧬 Вижу референс! Сохраняю черты лица и создаю новый образ...")
 
     try:
-        prompt_en = translate_prompt_for_image(prompt)
+        prompt_en = translate_prompt_for_image(prompt, is_reference=bool(reference_image))
         image_bytes = None
         used_engine = ""
         
-        generators = [
-            {"name": "Leonardo (Nano Banana 2)", "func": generate_image_leonardo},
-            {"name": "Pollinations (zimage)", "func": lambda p: generate_image_pollinations_auth(p, "zimage")},
-            {"name": "Pollinations (flux)", "func": lambda p: generate_image_pollinations_auth(p, "flux")},
-            {"name": "Pixazo (Flux)", "func": generate_image_pixazo},
-            {"name": "Together AI (Flux)", "func": generate_image_together}
-        ]
+        # Если есть референс, Leonardo — единственный вариант, поддерживающий Character Reference
+        generators = []
+        if reference_image:
+            generators = [{"name": "Leonardo (Nano Banana 2 + Ref)", "func": lambda p: generate_image_leonardo(p, reference_image=reference_image)}]
+        else:
+            generators = [
+                {"name": "Leonardo (Nano Banana 2)", "func": generate_image_leonardo},
+                {"name": "Pollinations (zimage)", "func": lambda p: generate_image_pollinations_auth(p, "zimage")},
+                {"name": "Pollinations (flux)", "func": lambda p: generate_image_pollinations_auth(p, "flux")},
+                {"name": "Pixazo (Flux)", "func": generate_image_pixazo},
+                {"name": "Together AI (Flux)", "func": generate_image_together}
+            ]
 
         for i, gen in enumerate(generators):
             try:
@@ -689,15 +716,20 @@ def _generate_and_send_image(user_id, prompt, message, force_premium=False):
                 continue
 
         if image_bytes:
-            caption = f"🎨 По запросу: _{prompt}_ [{used_engine}]"
+            ref_tag = " [с референсом]" if reference_image else ""
+            caption = f"🎨 По запросу: _{prompt}_{ref_tag} [{used_engine}]"
             safe_send_photo(user_id, image_bytes, caption=caption)
             add_message_to_memory(user_id, "user", f"[Запрос на картинку: {prompt}]")
             add_message_to_memory(user_id, "assistant", f"[Картинка сгенерирована ({used_engine})]")
         else:
-            bot.reply_to(message, "😔 Все генераторы сейчас перегружены. Попробуй позже.")
+            if reference_image:
+                bot.reply_to(message, "😔 Не удалось сгенерировать по фото. Возможно, модель перегружена или ключи исчерпаны.")
+            else:
+                bot.reply_to(message, "😔 Все генераторы сейчас перегружены. Попробуй позже.")
 
         bot.delete_message(user_id, status_msg.message_id)
     except Exception as e:
+        bot.reply_to(message, f"⚠️ Ошибка в мастерской: {e}")
         bot.reply_to(message, f"⚠️ Ошибка в мастерской: {e}")
 
 # 4. Обработчики Telegram
@@ -970,14 +1002,24 @@ def handle_photo(message):
         img_base64 = base64.b64encode(downloaded_file).decode('utf-8')
         
         # Подпись к фото или стандартный вопрос
-        user_question = message.caption if message.caption else "Опиши подробно, что ты видишь на этом изображении."
+        if not message.caption:
+            bot.reply_to(message, "📸 Фото получено! Теперь ты можешь **ответить (Reply)** на него своим промптом для генерации или задать вопрос по изображению.")
+            return
+
+        user_question = message.caption
         
-        # ЛОГИКА ВЫБОРА МОДЕЛИ
+        # ЛОГИКА ГЕНЕРАЦИИ ПО РЕФЕРЕНСУ (Face Swap / Character Reference)
+        draw_keywords = ["нарисуй", "изобрази", "сделай", "в стиле", "картинку", "измени", "смени", "портрет"]
+        is_draw_intent = any(k in user_question.lower() for k in draw_keywords) and len(user_question.split()) > 1
+        
+        if is_draw_intent:
+            # Используем фото как референс для Leonardo
+            _generate_and_send_image(user_id, user_question, message, reference_image=downloaded_file)
+            return
+
+        # ЛОГИКА ВЫБОРА МОДЕЛИ ДЛЯ АНАЛИЗА
         ocr_keywords = ["текст", "рукописн", "почерк", "прочитай", "расшифруй", "написано", "что здесь", "OCR"]
         is_ocr_task = any(k in user_question.lower() for k in ocr_keywords)
-        
-        description = ""
-        used_model = ""
         
         msg_status = bot.reply_to(message, "🔍 Изучаю изображение...")
         
