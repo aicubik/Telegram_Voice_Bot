@@ -162,30 +162,35 @@ class LeonardoClient:
                            init_image_id: str | None = None) -> str | None:
         """
         Step 1: POST to v2/generations -> returns generationId.
-        Supports optional Character Reference (preprocessorId 133).
+        Supports optional Character Reference (preprocessorId 397 for Phoenix).
+        
+        IMPORTANT: Leonardo v2 API expects ALL fields at the ROOT level of the
+        JSON body. Do NOT nest them inside 'parameters' — the API silently
+        ignores unknown wrapper keys.
         """
         payload = {
-            "model": self.DEFAULT_MODEL,
-            "parameters": {
-                "width": width,
-                "height": height,
-                "prompt": prompt,
-                "quantity": 1,
-                "prompt_enhance": "OFF",
-            },
+            "modelId": "de7d3faf-762f-48e0-b3b7-9d0ac3a3fcf3",  # Phoenix 1.0
+            "prompt": prompt,
+            "width": width,
+            "height": height,
+            "num_images": 1,
+            "alchemy": True,
+            "enhancePrompt": False,
             "public": False,
         }
 
         # Add Character Reference if image provided
         if init_image_id:
-            payload["parameters"]["controlnets"] = [
+            payload["controlnets"] = [
                 {
                     "initImageId": init_image_id,
                     "initImageType": "UPLOADED",
-                    "preprocessorId": 397,  # Character Reference (397 is correct for Phoenix/Nano Banana 2)
-                    "strengthType": "High"  # Max resemblance
+                    "preprocessorId": 397,   # Character Reference for Phoenix
+                    "strengthType": "High",
+                    "weight": 1.0,
                 }
             ]
+            print(f"[REF] Leonardo: Character Reference enabled (initImageId={init_image_id[:12]}...)")
 
         resp = http_requests.post(
             self.BASE_URL_V2,
@@ -198,16 +203,16 @@ class LeonardoClient:
             raise ValueError("INSUFFICIENT_FUNDS")
 
         if resp.status_code not in (200, 201):
-            print(f"[ERR] Leonardo POST failed: {resp.status_code} - {resp.text[:200]}")
+            print(f"[ERR] Leonardo POST failed: {resp.status_code} - {resp.text[:300]}")
             return None
 
         data = resp.json()
         gen_id = None
 
-        if "generate" in data:
-            gen_id = data["generate"].get("generationId")
-        elif "sdGenerationJob" in data:
+        if "sdGenerationJob" in data:
             gen_id = data["sdGenerationJob"].get("generationId")
+        elif "generate" in data:
+            gen_id = data["generate"].get("generationId")
         elif "generationId" in data:
             gen_id = data["generationId"]
         elif "id" in data:

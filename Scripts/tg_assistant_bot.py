@@ -353,15 +353,15 @@ def translate_prompt_for_image(user_prompt, is_reference=False):
     ref_reinforcement = ""
     
     if is_reference:
-        # Для character reference усиливаем фокус на лице
+        # Для character reference ставим инструкцию в самое начало
         style_suffix = "photorealistic, cinematic lighting, 8k, highly detailed"
-        ref_reinforcement = " (a portrait of the exact person from the reference image, preserving facial features and identity)"
+        ref_reinforcement = "A portrait of the EXACT person from the reference photo, maintaining their unique facial features and identity. "
 
     messages = [
         {"role": "system", "content": (
             "You are a translator. Translate the user's image generation prompt to English. "
-            f"If no specific artistic style is mentioned, add '{style_suffix}' to the prompt. "
-            f"If it's a reference-based generation, ensure the prompt includes: '{ref_reinforcement}'. "
+            f"If it's a reference-based generation, YOU MUST start the prompt with: '{ref_reinforcement}'. "
+            f"If no specific artistic style is mentioned, add '{style_suffix}' to the end of the prompt. "
             "If a specific style IS mentioned (e.g. 'в стиле аниме', 'нарисуй', 'иллюстрация', 'арт'), keep that style and DO NOT add the cinematic/realistic tags. "
             "Output ONLY the translated prompt, nothing else. No explanations."
         )},
