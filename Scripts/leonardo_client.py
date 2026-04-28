@@ -182,8 +182,8 @@ class LeonardoClient:
                 {
                     "initImageId": init_image_id,
                     "initImageType": "UPLOADED",
-                    "preprocessorId": 133,  # Character Reference (Magic for face consistency)
-                    "strengthType": "High"  # High resemblance
+                    "preprocessorId": 397,  # Character Reference (397 is correct for Phoenix/Nano Banana 2)
+                    "strengthType": "High"  # Max resemblance
                 }
             ]
 

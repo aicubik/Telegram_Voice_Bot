@@ -350,14 +350,18 @@ def analyze_image_openrouter(base64_image, user_question, model_id="google/gemma
 def translate_prompt_for_image(user_prompt, is_reference=False):
     """Скрытый перевод промпта пользователя на английский для генерации картинки."""
     style_suffix = "realistic cinematic style, 8k resolution, highly detailed"
+    ref_reinforcement = ""
+    
     if is_reference:
-        # For character reference, we want more specific focus on the scene
+        # Для character reference усиливаем фокус на лице
         style_suffix = "photorealistic, cinematic lighting, 8k, highly detailed"
+        ref_reinforcement = " (a portrait of the exact person from the reference image, preserving facial features and identity)"
 
     messages = [
         {"role": "system", "content": (
             "You are a translator. Translate the user's image generation prompt to English. "
             f"If no specific artistic style is mentioned, add '{style_suffix}' to the prompt. "
+            f"If it's a reference-based generation, ensure the prompt includes: '{ref_reinforcement}'. "
             "If a specific style IS mentioned (e.g. 'в стиле аниме', 'нарисуй', 'иллюстрация', 'арт'), keep that style and DO NOT add the cinematic/realistic tags. "
             "Output ONLY the translated prompt, nothing else. No explanations."
         )},
